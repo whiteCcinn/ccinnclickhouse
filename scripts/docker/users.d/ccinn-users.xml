@@ -1,0 +1,27 @@
+<clickhouse>
+    <profiles>
+        <default>
+            <max_memory_usage>400000000</max_memory_usage>
+        </default>
+        <readonly_profile>
+            <readonly>1</readonly>
+            <max_memory_usage>200000000</max_memory_usage>
+        </readonly_profile>
+    </profiles>
+    <users>
+        <default remove="1"/>
+        <ccinn>
+            <password>ccinn-pass</password>
+            <networks><ip>::/0</ip></networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </ccinn>
+        <reader>
+            <password>reader-pass</password>
+            <networks><ip>::/0</ip></networks>
+            <profile>readonly_profile</profile>
+            <quota>default</quota>
+        </reader>
+    </users>
+</clickhouse>

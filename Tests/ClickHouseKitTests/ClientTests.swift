@@ -61,7 +61,7 @@ struct RequestBuilderTests {
 
     @Test func largeBodiesAreGzipped() throws {
         let builder = RequestBuilder(configuration: configuration(port: 8123), baseURL: base, capabilities: ConnectionCapabilities())
-        let sql = "INSERT INTO t VALUES " + String(repeating: "(1, 'abc'),", count: 40_000) + "(2, 'x')"
+        let sql = "INSERT INTO t VALUES " + String(repeating: "(1, 'abc'),", count: 10_000) + "(2, 'x')"
         let request = try builder.request(sql: sql, queryID: "q", options: QueryOptions())
         #expect(request.headers["Content-Encoding"] == "gzip")
         #expect(request.body.count < sql.utf8.count / 5)

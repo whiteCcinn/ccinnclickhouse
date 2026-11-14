@@ -1,0 +1,5 @@
+<clickhouse>
+    <macros><cluster>ccinn_cluster</cluster><shard>01</shard><replica>node2</replica></macros>
+    <interserver_http_host>ccinnch-it-node2</interserver_http_host>
+    <display_name>ccinnch-it-node2</display_name>
+</clickhouse>

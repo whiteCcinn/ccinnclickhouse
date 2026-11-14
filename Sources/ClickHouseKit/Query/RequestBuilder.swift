@@ -79,7 +79,7 @@ public struct ConnectionCapabilities: Sendable, Equatable {
 /// Builds HTTP requests for statements (pure; unit-tested).
 public struct RequestBuilder: Sendable {
     public static let resultFormat = "TabSeparatedWithNamesAndTypes"
-    public static let compressBodyThreshold = 256 * 1024
+    public static let compressBodyThreshold = 64 * 1024
     public static let progressIntervalMilliseconds = 10_000
     /// Idle timeout for statements without their own limit.
     public static let defaultIdleTimeout: Double = 3600

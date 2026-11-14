@@ -1,0 +1,24 @@
+# chproxy in front of both replicas (integration tests only).
+server:
+  http:
+    listen_addr: ":9090"
+    allowed_networks: ["0.0.0.0/0"]
+users:
+  - name: "ccinn"
+    password: "ccinn-pass"
+    to_cluster: "ccinn"
+    to_user: "ccinn"
+    max_concurrent_queries: 50
+    max_execution_time: 120s
+  - name: "reader"
+    password: "reader-pass"
+    to_cluster: "ccinn"
+    to_user: "reader"
+clusters:
+  - name: "ccinn"
+    nodes: ["ccinnch-it-node1:8123", "ccinnch-it-node2:8123"]
+    users:
+      - name: "ccinn"
+        password: "ccinn-pass"
+      - name: "reader"
+        password: "reader-pass"

@@ -1,0 +1,17 @@
+<!-- Two replicas of one shard with an embedded Keeper on node1 (integration tests only). -->
+<clickhouse>
+    <remote_servers>
+        <ccinn_cluster>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica><host>ccinnch-it-node1</host><port>9000</port><user>ccinn</user><password>ccinn-pass</password></replica>
+                <replica><host>ccinnch-it-node2</host><port>9000</port><user>ccinn</user><password>ccinn-pass</password></replica>
+            </shard>
+        </ccinn_cluster>
+    </remote_servers>
+    <zookeeper>
+        <node><host>ccinnch-it-node1</host><port>9181</port></node>
+    </zookeeper>
+    <distributed_ddl><path>/clickhouse/task_queue/ddl</path></distributed_ddl>
+    <interserver_http_port>9009</interserver_http_port>
+</clickhouse>
