@@ -340,7 +340,7 @@ struct ReplicaSummary: View {
                 }
             }
             KeyValueList(items: [
-                ("Absolute delay", Format.duration(seconds: Double(replica.absoluteDelay))),
+                ("Absolute delay", replica.absoluteDelay == 0 ? "none" : Format.duration(seconds: Double(replica.absoluteDelay))),
                 ("Queue", "\(replica.queueSize) (inserts \(replica.insertsInQueue), merges \(replica.mergesInQueue), mutations \(replica.mutationsInQueue))"),
                 ("Oldest queue entry", replica.queueOldestTime ?? "—"),
                 ("Future parts / to check", "\(replica.futureParts) / \(replica.partsToCheck)"),
@@ -664,9 +664,9 @@ private struct ReplicationSection: View {
             ScrollView {
                 LoadableView(state: model.replica, retry: model.loadReplication) { replica in
                     if let replica {
-                        ReplicaSummary(replica: replica).padding(18)
+                        ReplicaSummary(replica: replica).padding(18).frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        Text("No replica status.").foregroundStyle(.secondary).padding(18)
+                        Text("No replica status.").foregroundStyle(.secondary).padding(18).frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .frame(minHeight: 120)
@@ -677,6 +677,7 @@ private struct ReplicationSection: View {
                     sectionTitle("Replication queue", count: queue.count)
                     ReplicationQueueTable(queue: queue)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .frame(minHeight: 140)
         }

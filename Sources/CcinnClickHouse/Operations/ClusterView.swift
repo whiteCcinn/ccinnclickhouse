@@ -86,7 +86,7 @@ private struct ClusterCard: View {
                             HStack(spacing: 8) {
                                 Circle().fill(replica.errorsCount > 0 ? Color.orange : Color.green).frame(width: 8, height: 8)
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text("\(replica.hostName):\(replica.port)").font(Theme.monospacedSmall)
+                                    Text(replica.hostName + ":" + String(replica.port)).font(Theme.monospacedSmall)
                                     Text("replica \(replica.replicaNumber)\(replica.errorsCount > 0 ? " · \(replica.errorsCount) errors" : "")")
                                         .font(.caption2).foregroundStyle(.secondary)
                                 }
