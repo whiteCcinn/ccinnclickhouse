@@ -10,7 +10,7 @@ extension ClickHouseClient {
     public func runningQueries(cluster: String? = nil, includeAppMonitoring: Bool = false) async throws -> [RunningQuery] {
         let list = systemSchema.selectList("processes", Self.processColumns)
         let sql = "SELECT hostName() AS host, \(list) FROM \(source("processes", cluster: cluster)) ORDER BY elapsed DESC LIMIT 2000"
-        let queries = try await run(sql, options: QueryOptions(purpose: "poll", limits: .metadata, timeout: Self.metadataTimeout, waitEndOfQuery: true))
+        let queries = try await run(sql, options: QueryOptions(purpose: "poll", limits: .metadata, timeout: Self.metadataTimeout, waitEndOfQuery: true, idempotent: true))
             .records.map(RunningQuery.init(record:))
         return includeAppMonitoring ? queries : queries.filter { !$0.isAppMonitoring }
     }
@@ -33,7 +33,7 @@ extension ClickHouseClient {
             \(column("memory_usage")) AS memory_usage, \(column("peak_memory_usage")) AS peak_memory_usage \
             FROM \(source("processes", cluster: isLoadBalanced ? cluster : nil)) WHERE query_id = \(SQLText.literal(queryID)) LIMIT 1
             """
-        let result = try await run(sql, options: QueryOptions(purpose: "poll", limits: RowLimits(maxRows: 1), timeout: 10, waitEndOfQuery: true))
+        let result = try await run(sql, options: QueryOptions(purpose: "poll", limits: RowLimits(maxRows: 1), timeout: 10, waitEndOfQuery: true, idempotent: true))
         guard let record = result.first else { return nil }
         var progress = QueryProgress()
         progress.elapsedNanoseconds = Int64(min(9.2e18, max(0, (record.double("elapsed") ?? 0) * 1e9)))

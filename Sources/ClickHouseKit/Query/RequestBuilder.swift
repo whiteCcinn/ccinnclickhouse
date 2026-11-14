@@ -32,12 +32,14 @@ public struct QueryOptions: Sendable {
     public var waitEndOfQuery: Bool
     /// `nil` follows the configuration.
     public var readOnly: Bool?
+    /// Safe to send twice (reads): retried once when a stale keep-alive connection drops before any response.
+    public var idempotent: Bool
     /// Called with the response head information before rows are read.
     public var onResponse: (@Sendable (ResponseInfo) -> Void)?
 
     public init(purpose: String = "sql", queryID: String? = nil, database: String? = nil, session: SessionParameters? = nil,
                 settings: [(String, String)] = [], limits: RowLimits = RowLimits(), timeout: Double? = nil, waitEndOfQuery: Bool = false,
-                readOnly: Bool? = nil, onResponse: (@Sendable (ResponseInfo) -> Void)? = nil) {
+                readOnly: Bool? = nil, idempotent: Bool = false, onResponse: (@Sendable (ResponseInfo) -> Void)? = nil) {
         self.purpose = purpose
         self.queryID = queryID
         self.database = database
@@ -47,11 +49,12 @@ public struct QueryOptions: Sendable {
         self.timeout = timeout
         self.waitEndOfQuery = waitEndOfQuery
         self.readOnly = readOnly
+        self.idempotent = idempotent
         self.onResponse = onResponse
     }
 
     public static func metadata(timeout: Double?) -> QueryOptions {
-        QueryOptions(purpose: "meta", limits: .metadata, timeout: timeout, waitEndOfQuery: true)
+        QueryOptions(purpose: "meta", limits: .metadata, timeout: timeout, waitEndOfQuery: true, idempotent: true)
     }
 }
 

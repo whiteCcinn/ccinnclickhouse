@@ -243,7 +243,12 @@ final class StreamingTaskDelegate: NSObject, URLSessionDataDelegate, @unchecked 
             return (state.responseContinuation, state.bodyContinuation)
         }
         if let responseContinuation {
-            responseContinuation.resume(throwing: ClickHouseError.transport(error ?? URLError(.badServerResponse)))
+            if let urlError = error as? URLError, urlError.code == .networkConnectionLost {
+                responseContinuation.resume(throwing: ClickHouseError(.network, "The connection to the server was lost",
+                                                                      isConnectionLostBeforeResponse: true))
+            } else {
+                responseContinuation.resume(throwing: ClickHouseError.transport(error ?? URLError(.badServerResponse)))
+            }
         }
         if let error {
             bodyContinuation?.finish(throwing: ClickHouseError.transport(error))

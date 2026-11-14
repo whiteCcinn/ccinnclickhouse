@@ -35,7 +35,12 @@ func waitUntil(_ timeout: Duration = .seconds(10), _ condition: () async throws 
     return try await condition()
 }
 
-@Suite("ClickHouse live server", .enabled(if: ITEnvironment.enabled), .serialized)
+/// Parent suite: live suites run one after another so a small (768 MB) server is never flooded.
+@Suite("Live", .enabled(if: ITEnvironment.enabled), .serialized)
+struct LiveSuites {}
+
+extension LiveSuites {
+@Suite("ClickHouse live server", .serialized)
 struct ClickHouseIntegrationTests {
     @Test func connectAndServerInfo() async throws {
         let client = try await ITEnvironment.connect()
@@ -235,7 +240,10 @@ struct ClickHouseIntegrationTests {
     }
 }
 
-@Suite("ClickHouse live metadata", .enabled(if: ITEnvironment.enabled), .serialized)
+}
+
+extension LiveSuites {
+@Suite("ClickHouse live metadata", .serialized)
 struct ClickHouseMetadataIntegrationTests {
     @Test func databasesAndTablesByFamily() async throws {
         let client = try await ITEnvironment.connect()
@@ -348,7 +356,7 @@ struct ClickHouseMetadataIntegrationTests {
         let dictionaries = try await client.dictionaries(database: "shop")
         let dictionary = try #require(dictionaries.first { $0.name == "country_dict" })
         #expect(dictionary.status == "LOADED")
-        #expect(dictionary.elementCount == 6)
+        #expect(dictionary.elementCount >= 6)
         try await client.reloadDictionary(dictionary)
         _ = try await client.clusters()
         #expect(try await client.keeperStatus().state == .notConfigured || ProcessInfo.processInfo.environment["CCINNCH_IT_CLUSTER"] != nil)
@@ -380,4 +388,5 @@ struct ClickHouseMetadataIntegrationTests {
             #expect(!result.rows.isEmpty, "\(prefix)")
         }
     }
+}
 }

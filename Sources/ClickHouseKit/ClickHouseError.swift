@@ -25,13 +25,18 @@ public struct ClickHouseError: Error, LocalizedError, Sendable, Equatable, Custo
     /// Symbolic ClickHouse error name (`UNKNOWN_TABLE`).
     public let name: String?
     public let httpStatus: Int?
+    /// The connection dropped before any response arrived (typically a keep-alive connection the
+    /// server closed just as the request was sent): idempotent requests may be retried once.
+    public let isConnectionLostBeforeResponse: Bool
 
-    public init(_ kind: Kind, _ message: String, code: Int? = nil, name: String? = nil, httpStatus: Int? = nil) {
+    public init(_ kind: Kind, _ message: String, code: Int? = nil, name: String? = nil, httpStatus: Int? = nil,
+                isConnectionLostBeforeResponse: Bool = false) {
         self.kind = kind
         self.message = message
         self.code = code
         self.name = name
         self.httpStatus = httpStatus
+        self.isConnectionLostBeforeResponse = isConnectionLostBeforeResponse
     }
 
     public var errorDescription: String? { message }

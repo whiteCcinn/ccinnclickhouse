@@ -36,7 +36,8 @@ public actor SQLSession {
     }
 
     /// Runs one statement in the session.
-    public func run(_ sql: String, limits: RowLimits = RowLimits(), timeout: Double? = nil,
+    /// `idempotent` (reads) allows one retry when a stale keep-alive connection drops before any response.
+    public func run(_ sql: String, limits: RowLimits = RowLimits(), timeout: Double? = nil, idempotent: Bool = false,
                     onResponse: (@Sendable (ResponseInfo) -> Void)? = nil) async throws -> QueryResult {
         // One statement at a time; a rejected second run must not touch the running one's state.
         guard !isBusy else { throw ClickHouseError(.busy, "This editor is already running a statement") }
@@ -51,7 +52,8 @@ public actor SQLSession {
             let queryID = RequestBuilder.makeQueryID(purpose: purpose)
             let options = QueryOptions(purpose: purpose, queryID: queryID, database: database,
                                        session: sessionsSupported ? SessionParameters(id: sessionID, check: established, timeout: sessionTimeout) : nil,
-                                       settings: sessionsSupported ? [] : settingPairs, limits: limits, timeout: timeout, onResponse: onResponse)
+                                       settings: sessionsSupported ? [] : settingPairs, limits: limits, timeout: timeout, idempotent: idempotent,
+                                       onResponse: onResponse)
             let client = client
             let task = Task { try await client.run(sql, options: options) }
             runningTask = task

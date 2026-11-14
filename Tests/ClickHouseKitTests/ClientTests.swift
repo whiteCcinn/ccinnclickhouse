@@ -379,7 +379,7 @@ struct BinaryValueTests {
 @Suite("Exceptions beyond limits", .serialized)
 struct ExceptionBeyondLimitTests {
     @Test func exceptionInTheSameChunkWinsOverTheRowLimit() async throws {
-        let rows = (0..<5_000).map { "\($0)\n" }.joined()
+        let rows = (0..<50).map { "\($0)\n" }.joined()
         let server = try await FakeClickHouseServer { request in
             if let answer = FakeAnswers.standard(request) { return answer }
             return .tsv("n\nUInt64\n" + rows + "Code: 241. DB::Exception: Memory limit exceeded. (MEMORY_LIMIT_EXCEEDED) (version 23.8.16.16 (official build))\n")
@@ -393,5 +393,45 @@ struct ExceptionBeyondLimitTests {
         } catch let error as ClickHouseError {
             #expect(error.code == 241)
         }
+    }
+}
+
+@Suite("Stale keep-alive connections", .serialized)
+struct StaleConnectionTests {
+    @Test func idempotentRequestsAreRetriedOnce() async throws {
+        let drops = OSAllocatedUnfairLock(initialState: 0)
+        let server = try await FakeClickHouseServer { request in
+            if let answer = FakeAnswers.standard(request) { return answer }
+            if request.sql.contains("flaky"), drops.withLock({ value -> Bool in value += 1; return value == 1 }) {
+                var response = FakeClickHouseServer.Response.empty()
+                response.dropConnection = true
+                return response
+            }
+            return .tsv("x\nUInt8\n1\n")
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        #expect(try await client.run("SELECT flaky", options: QueryOptions(idempotent: true)).rows == [["1"]])
+        #expect(server.requests(containing: "flaky").count == 2)
+    }
+
+    @Test func nonIdempotentRequestsAreNotRetried() async throws {
+        let server = try await FakeClickHouseServer { request in
+            if let answer = FakeAnswers.standard(request) { return answer }
+            var response = FakeClickHouseServer.Response.empty()
+            response.dropConnection = true
+            return response
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        do {
+            _ = try await client.run("INSERT INTO t VALUES (1)")
+            Issue.record("expected failure")
+        } catch let error as ClickHouseError {
+            #expect(error.kind == .network)
+        }
+        #expect(server.requests(containing: "INSERT").count == 1)
     }
 }

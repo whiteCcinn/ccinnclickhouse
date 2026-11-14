@@ -85,7 +85,7 @@ public final class ClickHouseClient: Sendable {
             let builder = RequestBuilder(configuration: configuration, baseURL: baseURL, capabilities: capabilities)
             do {
                 let outcome = try await run(sql, builder: builder, transport: transport,
-                                            options: QueryOptions(purpose: "meta", limits: .metadata, timeout: nil, waitEndOfQuery: true))
+                                            options: QueryOptions(purpose: "meta", limits: .metadata, timeout: nil, waitEndOfQuery: true, idempotent: true))
                 let record = outcome.result.first
                 return ServerInfo(versionString: record?.text("version") ?? "unknown", timeZone: record?.text("timezone"),
                                   currentUser: record?.text("user"), hostName: record?.text("host"),
@@ -174,7 +174,13 @@ public final class ClickHouseClient: Sendable {
                     freshConnection: Bool = false) async throws -> ResponseReader.Outcome {
         let queryID = options.queryID ?? RequestBuilder.makeQueryID(purpose: options.purpose)
         let request = try builder.request(sql: sql, queryID: queryID, options: options, freshConnection: freshConnection)
-        let response = try await transport.send(request)
+        let response: HTTPStreamingResponse
+        do {
+            response = try await transport.send(request)
+        } catch let error as ClickHouseError where error.isConnectionLostBeforeResponse && options.idempotent && !Task.isCancelled {
+            // A keep-alive connection closed by the server (e.g. 3 s keep_alive_timeout on 22.x) as we sent.
+            response = try await transport.send(request)
+        }
         return try await withTaskCancellationHandler {
             try await ResponseReader.read(response, queryID: queryID, limits: options.limits, onResponse: options.onResponse)
         } onCancel: {
@@ -227,7 +233,7 @@ public final class ClickHouseClient: Sendable {
                 try Task.checkCancellation()
                 let outcome = try await Self.run(sql, builder: builder, transport: transport,
                                                  options: QueryOptions(purpose: "kill", limits: .metadata, timeout: 10, waitEndOfQuery: true,
-                                                                       readOnly: false),
+                                                                       readOnly: false, idempotent: true),
                                                  freshConnection: attempt > 0)
                 if let row = outcome.result.first {
                     return KillOutcome.killed(status: row.text("kill_status"))

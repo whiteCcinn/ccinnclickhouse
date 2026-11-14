@@ -27,6 +27,8 @@ final class FakeClickHouseServer: @unchecked Sendable {
         var headDelay: Duration = .zero
         /// Close the connection without the terminating chunk (as ClickHouse 25.x does after an exception).
         var breakChunking = false
+        /// Close the connection without answering (a keep-alive connection the server just closed).
+        var dropConnection = false
 
         static func tsv(_ text: String, headers: [String: String] = [:]) -> Response {
             var all = ["X-ClickHouse-Format": "TabSeparatedWithNamesAndTypes", "X-ClickHouse-Server-Display-Name": "fake-node"]
@@ -177,6 +179,7 @@ final class FakeClickHouseServer: @unchecked Sendable {
 
     /// Writes the response; returns false when the connection must be closed.
     private func write(_ response: Response, to connection: NWConnection) async -> Bool {
+        if response.dropConnection { return false }
         if response.headDelay > .zero { try? await Task.sleep(for: response.headDelay) }
         var head = "HTTP/1.1 \(response.status) \(response.status == 200 ? "OK" : "Error")\r\n"
         var headers = response.headers
