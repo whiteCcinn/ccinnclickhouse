@@ -212,9 +212,16 @@ final class SQLTabModel {
         run([(sql, nil)])
     }
 
+    /// Cancels the running batch synchronously. The cancellation reaches the statement through the
+    /// task (SQLSession aborts the request and kills its query id), so a Stop pressed as a statement
+    /// finishes still ends "Run all", and it can never land on a statement started later.
     func stop() {
         guard isRunning else { return }
-        Task { await session.cancel() }
+        runTask?.cancel()
+        if let pendingConfirmation {
+            self.pendingConfirmation = nil
+            pendingConfirmation.continuation.resume(returning: false)
+        }
     }
 
     /// Runs statements sequentially; stops at the first error.
@@ -247,6 +254,7 @@ final class SQLTabModel {
                 guard confirmed else { return }
             }
             for (index, statement) in statements.enumerated() {
+                if Task.isCancelled { break }
                 let succeeded = await execute(statement.text, index: index, offset: statement.offset)
                 if !succeeded || Task.isCancelled { break }
             }
