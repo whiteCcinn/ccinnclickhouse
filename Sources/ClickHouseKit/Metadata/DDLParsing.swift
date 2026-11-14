@@ -237,15 +237,17 @@ enum DDLScanner {
             } else if scalar == ")" || scalar == "]" {
                 depth = max(0, depth - 1)
             } else if depth == 0, index == 0 || !isIdentifierPart(scalars[index - 1]) {
+                var matched = false
                 for (offset, keyword) in keywordScalars.enumerated() where matches(scalars, at: index, keyword) {
                     let end = index + keyword.count
                     if end == scalars.count || !isIdentifierPart(scalars[end]) {
                         found.append((keywords[offset], index, end))
                         index = end
+                        matched = true
                         break
                     }
                 }
-                continue
+                if matched { continue }
             }
             index += 1
         }
