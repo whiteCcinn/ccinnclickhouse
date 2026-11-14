@@ -267,3 +267,53 @@ struct ReadOnlyBatchTests {
         #expect(ReadOnlySQLGuard.firstRefusal(in: ["SELECT 1", "TRUNCATE TABLE t"])?.sql == "TRUNCATE TABLE t")
     }
 }
+
+@Suite("Settings and format as column names")
+struct ClauseLookalikeTests {
+    @Test func autoLimitLeavesColumnsNamedSettingsOrFormatAlone() {
+        #expect(AutoLimit.apply(to: "SELECT query, Settings FROM system.query_log", limit: 201).sql
+            == "SELECT query, Settings FROM system.query_log LIMIT 201")
+        #expect(AutoLimit.apply(to: "SELECT format, count() FROM files GROUP BY format", limit: 201).sql
+            == "SELECT format, count() FROM files GROUP BY format LIMIT 201")
+        #expect(AutoLimit.apply(to: "SELECT t.settings FROM t", limit: 201).sql == "SELECT t.settings FROM t LIMIT 201")
+        #expect(AutoLimit.apply(to: "SELECT Settings['max_threads'] FROM system.query_log WHERE Settings['x'] = '1'", limit: 5).sql
+            == "SELECT Settings['max_threads'] FROM system.query_log WHERE Settings['x'] = '1' LIMIT 5")
+        // Real clauses still get the limit in front of them.
+        #expect(AutoLimit.apply(to: "SELECT Settings FROM system.query_log SETTINGS max_threads = 1", limit: 5).sql
+            == "SELECT Settings FROM system.query_log LIMIT 5 SETTINGS max_threads = 1")
+        #expect(AutoLimit.apply(to: "SELECT format FROM files FORMAT JSONEachRow", limit: 5).sql
+            == "SELECT format FROM files LIMIT 5 FORMAT JSONEachRow")
+        #expect(AutoLimit.apply(to: "SELECT 1 FORMAT Template SETTINGS format_template_row = 'r'", limit: 5).sql
+            == "SELECT 1 LIMIT 5 FORMAT Template SETTINGS format_template_row = 'r'")
+        #expect(AutoLimit.apply(to: "SELECT 1 SETTINGS `max_threads` = 1", limit: 5).sql == "SELECT 1 LIMIT 5 SETTINGS `max_threads` = 1")
+        #expect(AutoLimit.apply(to: "SELECT 1 SETTINGS limit = 3", limit: 5).sql == "SELECT 1 LIMIT 5 SETTINGS limit = 3")
+    }
+
+    @Test func autoLimitSkipsQueriesWithAnOffsetClause() {
+        #expect(AutoLimit.apply(to: "SELECT * FROM t OFFSET 10", limit: 201).applied == false)
+        #expect(AutoLimit.apply(to: "SELECT * FROM t ORDER BY k OFFSET 10 ROWS", limit: 201).applied == false)
+        #expect(AutoLimit.apply(to: "SELECT offset FROM t", limit: 201).sql == "SELECT offset FROM t LIMIT 201")
+    }
+
+    @Test func readOnlyGuardAllowsColumnsNamedSettings() {
+        #expect(ReadOnlySQLGuard.check("SELECT query, Settings FROM system.query_log") == nil)
+        #expect(ReadOnlySQLGuard.check("SELECT Settings['max_threads'] AS t FROM system.query_log") == nil)
+        #expect(ReadOnlySQLGuard.check("SELECT mapKeys(Settings), Settings AS s FROM system.query_log ORDER BY event_time DESC") == nil)
+        #expect(ReadOnlySQLGuard.check("SELECT l.settings FROM system.query_log AS l") == nil)
+    }
+
+    @Test(arguments: [
+        "SELECT 1 SETTINGS readonly = 0",
+        "SELECT 1 SETTINGS readonly=0",
+        "SELECT 1 settings `readonly` = 0",
+        "SELECT * FROM t SETTINGS max_execution_time = 0, max_result_rows = 0",
+        "SELECT Settings FROM system.query_log SETTINGS readonly = 0",
+        "SELECT 1 SETTINGS limit = 0",
+        "SELECT 1 SETTINGS a.b = 1",
+        "SELECT * FROM (SELECT 1 SETTINGS readonly = 0)",
+        "SELECT Settings = map() FROM system.query_log",
+    ])
+    func readOnlyGuardStillRefusesSettingsClauses(_ sql: String) {
+        #expect(ReadOnlySQLGuard.check(sql) != nil, "\(sql)")
+    }
+}

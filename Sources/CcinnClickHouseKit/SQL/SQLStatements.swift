@@ -82,6 +82,52 @@ struct StatementWords {
 
     func word(_ index: Int) -> String? { words.indices.contains(index) ? words[index] : nil }
 
+    func isPunctuation(_ index: Int, _ text: String) -> Bool {
+        tokens.indices.contains(index) && tokens[index].kind == .punctuation && words[index] == text
+    }
+
+    /// An identifier, keyword or quoted identifier (a possible column or setting name).
+    func isName(_ index: Int) -> Bool {
+        isWord(index) || (tokens.indices.contains(index) && tokens[index].kind == .quotedIdentifier)
+    }
+
+    /// The end of the statement (or its terminating `;`).
+    func isEnd(_ index: Int) -> Bool { index >= tokens.count || isPunctuation(index, ";") }
+
+    /// `SETTINGS name = …`: the clause, not a column called `settings` (`Settings['x']`, `t.settings`).
+    func isSettingsClause(at index: Int) -> Bool {
+        word(index) == "SETTINGS" && isWord(index) && !isPunctuation(index - 1, ".") && isName(index + 1)
+            && tokens.indices.contains(index + 2) && tokens[index + 2].kind == .operator && words[index + 2] == "="
+    }
+
+    /// Words after a column reference: a `settings` followed by one of these is a column, not a clause.
+    static let columnFollowers: Set<String> = ["FROM", "AS", "WHERE", "PREWHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "UNION", "EXCEPT",
+                                               "INTERSECT", "AND", "OR", "IS", "IN", "NOT", "LIKE", "ILIKE", "BETWEEN", "ASC", "DESC",
+                                               "FORMAT", "INTO", "WINDOW", "QUALIFY", "NULLS", "COLLATE"]
+
+    /// Fail-closed variant for the read-only guard: anything that is not clearly a column named
+    /// `settings` counts as the clause.
+    func mayBeSettingsClause(at index: Int) -> Bool {
+        guard word(index) == "SETTINGS", isWord(index), !isPunctuation(index - 1, ".") else { return false }
+        if isSettingsClause(at: index) || isEnd(index + 1) { return isSettingsClause(at: index) }
+        if ["[", ",", ")", ".", "]", "}"].contains(where: { isPunctuation(index + 1, $0) }) { return false }
+        if isWord(index + 1), let next = word(index + 1), Self.columnFollowers.contains(next) { return false }
+        return true
+    }
+
+    /// `FORMAT name` at the end of the statement (optionally followed by a SETTINGS clause), not a
+    /// column called `format`.
+    func isFormatClause(at index: Int) -> Bool {
+        guard word(index) == "FORMAT", isWord(index), !isPunctuation(index - 1, "."), isName(index + 1) else { return false }
+        return isEnd(index + 2) || isSettingsClause(at: index + 2)
+    }
+
+    /// `OFFSET n [ROWS]` (a number or a query parameter follows), not a column called `offset`.
+    func isOffsetClause(at index: Int) -> Bool {
+        guard word(index) == "OFFSET", isWord(index), !isPunctuation(index - 1, "."), tokens.indices.contains(index + 1) else { return false }
+        return tokens[index + 1].kind == .number || tokens[index + 1].kind == .parameter || isPunctuation(index + 1, "(")
+    }
+
     /// Parenthesis/bracket depth before each token.
     var depths: [Int] {
         var depth = 0
@@ -200,6 +246,8 @@ public enum AutoLimit {
             if words[index] == ";", statement.tokens[index].kind == .punctuation { break }
             lastSignificant = index
             guard depths[index] == 0, statement.isWord(index) else { continue }
+            // Inside a SETTINGS clause, `limit = 3` or `offset = 1` name settings, not clauses.
+            if insertBefore != nil, statement.word(index + 1) == "=" { continue }
             switch words[index] {
             case "UNION", "EXCEPT", "INTERSECT":
                 // The limit would only apply to the last SELECT; leave compound queries alone.
@@ -208,8 +256,13 @@ public enum AutoLimit {
                 return Outcome(sql: sql, applied: false)
             case "LIMIT":
                 if !isLimitBy(statement, depths: depths, at: index) { return Outcome(sql: sql, applied: false) }
-            case "SETTINGS", "FORMAT":
-                if insertBefore == nil { insertBefore = index }
+            case "OFFSET":
+                // `OFFSET n` without LIMIT: `LIMIT n OFFSET m ROWS` is not valid everywhere, so leave it.
+                if statement.isOffsetClause(at: index) { return Outcome(sql: sql, applied: false) }
+            case "SETTINGS":
+                if insertBefore == nil, statement.isSettingsClause(at: index) { insertBefore = index }
+            case "FORMAT":
+                if insertBefore == nil, statement.isFormatClause(at: index) { insertBefore = index }
             default:
                 break
             }

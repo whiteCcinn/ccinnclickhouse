@@ -123,7 +123,7 @@ public enum ReadOnlySQLGuard {
             let isName = words.isWord(index) || token.kind == .quotedIdentifier
             if words.isWord(index) {
                 if word == "FROM" || word == "JOIN" { inFromList[depth] = true } else if fromListEnds.contains(word) { inFromList[depth] = false }
-                if word == "SETTINGS" {
+                if words.mayBeSettingsClause(at: index) {
                     return "Per-query SETTINGS are not allowed in read-only mode: they could lift `readonly` or widen the limits of the query."
                 }
                 if word == "INTO", words.word(index + 1) == "OUTFILE" { return "SELECT … INTO OUTFILE is not allowed in read-only mode." }
