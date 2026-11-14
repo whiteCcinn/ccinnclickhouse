@@ -505,3 +505,100 @@ struct ReadOnlyEnforcementTests {
         await #expect(throws: ClickHouseError.self) { _ = try await ClickHouseClient.connect(configuration(port: server.port, readOnly: true)) }
     }
 }
+
+@Suite("Retry after a dropped connection reached the server", .serialized)
+struct RetryReachedServerTests {
+    /// The fake received the first attempt's body, then dropped the connection; it treats that query as
+    /// still running until a KILL for its id arrives, like ClickHouse would.
+    final class Running: @unchecked Sendable {
+        let lock = OSAllocatedUnfairLock<(running: Set<String>, dropped: Bool)>(initialState: ([], false))
+    }
+
+    @Test func retryUsesAFreshQueryIDAndKillsTheFirstAttempt() async throws {
+        let state = Running()
+        let server = try await FakeClickHouseServer { request in
+            if request.sql.hasPrefix("KILL QUERY"), let id = request.sql.split(separator: "'").dropFirst().first.map(String.init) {
+                state.lock.withLock { _ = $0.running.remove(id) }
+                return .tsv("kill_status\tquery_id\nString\tString\nfinished\t\(id)\n")
+            }
+            if let answer = FakeAnswers.standard(request) { return answer }
+            guard let id = request.queryID else { return .empty() }
+            let dropNow = state.lock.withLock { value -> Bool in
+                if value.dropped { return false }
+                value.dropped = true
+                value.running.insert(id)
+                return true
+            }
+            if dropNow {
+                var response = FakeClickHouseServer.Response.empty()
+                response.dropConnection = true
+                return response
+            }
+            if state.lock.withLock({ $0.running.contains(id) }) {
+                return .exception(code: 216, name: "QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING", message: "Query with id = \(id) is already running")
+            }
+            return .tsv("x\nUInt8\n1\n")
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        let result = try await client.run("SELECT flaky", options: QueryOptions(queryID: "ccinnch-sql-first", idempotent: true))
+        #expect(result.rows == [["1"]])
+        let attempts = server.requests(containing: "flaky")
+        #expect(attempts.count == 2)
+        #expect(attempts[0].queryID == "ccinnch-sql-first")
+        #expect(attempts[1].queryID != "ccinnch-sql-first")
+        #expect(result.queryID == attempts[1].queryID)
+        #expect(await eventually { !server.requests(containing: "query_id = 'ccinnch-sql-first'").isEmpty })
+    }
+
+    @Test func sessionLockedByTheFirstAttemptIsWaitedOut() async throws {
+        let state = Running()
+        let server = try await FakeClickHouseServer { request in
+            if request.sql.hasPrefix("KILL QUERY"), let id = request.sql.split(separator: "'").dropFirst().first.map(String.init) {
+                state.lock.withLock { _ = $0.running.remove(id) }
+                return .tsv("kill_status\tquery_id\nString\tString\nfinished\t\(id)\n")
+            }
+            if let answer = FakeAnswers.standard(request) { return answer }
+            guard let id = request.queryID, request.parameters["session_id"] != nil else { return .tsv("x\nUInt8\n1\n") }
+            let dropNow = state.lock.withLock { value -> Bool in
+                if value.dropped { return false }
+                value.dropped = true
+                value.running.insert(id)
+                return true
+            }
+            if dropNow {
+                var response = FakeClickHouseServer.Response.empty()
+                response.dropConnection = true
+                return response
+            }
+            // While the first attempt "runs", it holds the session.
+            if state.lock.withLock({ !$0.running.isEmpty }) {
+                return .exception(code: 373, name: "SESSION_IS_LOCKED", message: "Session is locked by a concurrent client")
+            }
+            return .tsv("x\nUInt8\n1\n")
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        let session = client.openSession()
+        #expect(try await session.run("SELECT flaky", idempotent: true).rows == [["1"]])
+        let ids = server.requests(containing: "flaky").compactMap(\.queryID)
+        #expect(Set(ids).count == ids.count, "every attempt has its own query id")
+        #expect(!server.requests(containing: "KILL QUERY WHERE query_id = '\(ids[0])'").isEmpty)
+    }
+
+    @Test func writesAreNeverRetriedEvenInASession() async throws {
+        let server = try await FakeClickHouseServer { request in
+            if let answer = FakeAnswers.standard(request) { return answer }
+            var response = FakeClickHouseServer.Response.empty()
+            response.dropConnection = true
+            return response
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        await #expect(throws: ClickHouseError.self) { _ = try await client.openSession().run("INSERT INTO t SELECT 1", idempotent: false) }
+        #expect(server.requests(containing: "INSERT INTO t").count == 1)
+    }
+}

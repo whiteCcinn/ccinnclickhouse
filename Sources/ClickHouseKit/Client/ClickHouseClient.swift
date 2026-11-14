@@ -160,14 +160,34 @@ public final class ClickHouseClient: Sendable {
     // MARK: Statements
 
     /// Runs one statement. Cancelling the calling task aborts the request and kills the query on the server.
+    ///
+    /// Idempotent statements are retried once when the connection drops before any response (a
+    /// keep-alive connection the server closed as we sent). A dropped connection does not prove the
+    /// server never received the first attempt, so the retry gets its own query id (no
+    /// QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING) and the first attempt is killed; a session still held by
+    /// it yields SESSION_IS_LOCKED, which `SQLSession` waits out.
     public func run(_ sql: String, options: QueryOptions = QueryOptions()) async throws -> QueryResult {
         let queryID = options.queryID ?? RequestBuilder.makeQueryID(purpose: options.purpose)
         var options = options
         options.queryID = queryID
         let builder = builder
         let transport = transport
-        let work: @Sendable () async throws -> ResponseReader.Outcome = { [options] in
-            try await Self.run(sql, builder: builder, transport: transport, options: options)
+        // Every query id sent for this statement, so cancellation and timeouts kill all of them.
+        let attempts = OSAllocatedUnfairLock(initialState: [queryID])
+        let work: @Sendable () async throws -> ResponseReader.Outcome = { [options, self] in
+            do {
+                return try await Self.run(sql, builder: builder, transport: transport, options: options)
+            } catch let error as ClickHouseError where error.isConnectionLostBeforeResponse && options.idempotent && !Task.isCancelled {
+                var retry = options
+                let retryID = RequestBuilder.makeQueryID(purpose: options.purpose)
+                retry.queryID = retryID
+                attempts.withLock { $0.append(retryID) }
+                self.killInBackground(queryID: queryID)
+                return try await Self.run(sql, builder: builder, transport: transport, options: retry)
+            }
+        }
+        func killAll() {
+            for id in attempts.withLock({ $0 }) { killInBackground(queryID: id) }
         }
         do {
             let outcome: ResponseReader.Outcome
@@ -179,14 +199,14 @@ public final class ClickHouseClient: Sendable {
                 outcome = try await work()
             }
             noteNode(outcome.result.serverDisplayName)
-            if outcome.stoppedEarly { killInBackground(queryID: queryID) }
+            if outcome.stoppedEarly { killInBackground(queryID: outcome.result.queryID) }
             return outcome.result
         } catch let error as ClickHouseError where error.kind == .cancelled || error.kind == .timeout {
-            // The request was abandoned; the query id is unique, so this kill can never hit another statement.
-            killInBackground(queryID: queryID)
+            // The request was abandoned; query ids are unique, so these kills can never hit another statement.
+            killAll()
             throw error
         } catch is CancellationError {
-            killInBackground(queryID: queryID)
+            killAll()
             throw ClickHouseError.cancelled()
         }
     }
@@ -195,13 +215,7 @@ public final class ClickHouseClient: Sendable {
                     freshConnection: Bool = false) async throws -> ResponseReader.Outcome {
         let queryID = options.queryID ?? RequestBuilder.makeQueryID(purpose: options.purpose)
         let request = try builder.request(sql: sql, queryID: queryID, options: options, freshConnection: freshConnection)
-        let response: HTTPStreamingResponse
-        do {
-            response = try await transport.send(request)
-        } catch let error as ClickHouseError where error.isConnectionLostBeforeResponse && options.idempotent && !Task.isCancelled {
-            // A keep-alive connection closed by the server (e.g. 3 s keep_alive_timeout on 22.x) as we sent.
-            response = try await transport.send(request)
-        }
+        let response = try await transport.send(request)
         return try await withTaskCancellationHandler {
             try await ResponseReader.read(response, queryID: queryID, limits: options.limits, onResponse: options.onResponse)
         } onCancel: {
