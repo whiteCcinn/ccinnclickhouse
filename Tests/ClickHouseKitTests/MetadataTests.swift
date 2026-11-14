@@ -117,6 +117,8 @@ struct MetadataTests {
         #expect(warnings.first?.message.contains("partition 202401") == true)
         #expect(warnings.contains { $0.message.contains("small parts") })
         #expect(PartHealth.warnings(partitions: [], limits: limits).isEmpty)
+        let unpartitioned = [PartitionSummary(partition: "tuple()", partitionID: "all", activeParts: 60)]
+        #expect(PartHealth.warnings(partitions: unpartitioned, limits: limits).first?.message.hasPrefix("the table has 60 active parts") == true)
     }
 
     @Test func recordsSaturateAndParseArrays() {

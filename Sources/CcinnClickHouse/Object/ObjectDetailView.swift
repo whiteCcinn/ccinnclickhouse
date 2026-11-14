@@ -200,7 +200,9 @@ private struct OverviewSection: View {
     }
 
     private func keysCard(_ table: TableInfo) -> some View {
-        var items: [(String, String)] = [("Engine", model.details.value?.engineFull ?? table.engine)]
+        // The engine with its arguments; keys, TTL and settings are listed separately.
+        let arguments = model.definition?.arguments ?? []
+        var items: [(String, String)] = [("Engine", arguments.isEmpty ? table.engine : "\(table.engine)(\(arguments.joined(separator: ", ")))")]
         if let key = table.partitionKey, !key.isEmpty { items.append(("Partition by", key)) }
         if let key = table.sortingKey, !key.isEmpty { items.append(("Order by", key)) }
         if let key = table.primaryKey, !key.isEmpty, key != table.sortingKey { items.append(("Primary key", key)) }
@@ -448,7 +450,7 @@ private struct PartsSection: View {
                                 if let limits = model.limits {
                                     Circle().fill(Theme.color(for: PartHealth.level(activeParts: partition.activeParts, limits: limits))).frame(width: 7, height: 7)
                                 }
-                                Text(partition.partition.isEmpty ? "(unpartitioned)" : partition.partition).font(Theme.monospacedSmall).textSelection(.enabled)
+                                Text(partition.isUnpartitioned ? "(unpartitioned)" : partition.partition).font(Theme.monospacedSmall).textSelection(.enabled)
                             }
                         }
                         TableColumn("Active parts") { Text(Format.count($0.activeParts)).monospacedDigit() }.width(78)

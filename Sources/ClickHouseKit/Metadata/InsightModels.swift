@@ -19,6 +19,9 @@ public struct PartitionSummary: Sendable, Hashable, Identifiable {
 
     public var id: String { partitionID }
 
+    /// Tables without PARTITION BY have one partition named `tuple()` (id `all`).
+    public var isUnpartitioned: Bool { partition.isEmpty || partition == "tuple()" || partitionID == "all" }
+
     public var compressionRatio: Double? {
         guard compressedBytes > 0, uncompressedBytes > 0 else { return nil }
         return Double(uncompressedBytes) / Double(compressedBytes)
