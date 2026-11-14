@@ -73,6 +73,17 @@ struct HistoryExportTests {
         #expect(permissions?.intValue == 0o600)
     }
 
+    @Test func historyRedactsErrorText() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ccinnch-history-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = QueryHistoryStore(directory: directory, profileID: UUID(), maxEntries: 3)
+        await store.append(QueryHistoryEntry(sql: "CREATE USER u IDENTIFIED WITH sha256_password BY 'HISTSECRET',", database: nil, durationMilliseconds: 1,
+                                             errorMessage: "Syntax error: failed at position 60 ('HISTSECRET') (line 1, col 60): 'HISTSECRET',. Expected one of: token"))
+        let text = try String(contentsOf: store.fileURL, encoding: .utf8)
+        #expect(!text.contains("HISTSECRET"))
+        #expect(await store.all().first?.errorMessage?.contains("failed at position 60") == true)
+    }
+
     @Test func csvNeutralisesFormulasButKeepsNumbers() {
         let columns = [ColumnDefinition(name: "n", typeName: "Int64"), ColumnDefinition(name: "s", typeName: "String"),
                        ColumnDefinition(name: "a", typeName: "Array(String)")]

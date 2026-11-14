@@ -335,3 +335,47 @@ struct AutoLimitOffsetMappingTests {
         #expect(AutoLimit.Outcome(sql: original, applied: false).originalOffset(ofExecuted: 12) == 12)
     }
 }
+
+@Suite("Redaction of connection strings, extra auth methods and error text")
+struct RedactionGapTests {
+    @Test(arguments: [
+        ("SELECT * FROM azureBlobStorage('DefaultEndpointsProtocol=https;AccountName=a;AccountKey=AZSECRET==;EndpointSuffix=core.windows.net', 'c', 'b')", "AZSECRET"),
+        ("SELECT * FROM azureBlobStorage('BlobEndpoint=https://a.blob.core.windows.net/;SharedAccessSignature=sv=2022&sig=SASSECRET', 'c', 'b')", "SASSECRET"),
+        ("CREATE USER u IDENTIFIED WITH plaintext_password BY 'FIRSTSECRET', sha256_password BY 'SECONDSECRET'", "SECONDSECRET"),
+        ("CREATE USER u IDENTIFIED WITH plaintext_password BY 'FIRSTSECRET', sha256_password BY 'SECONDSECRET'", "FIRSTSECRET"),
+        ("ALTER USER u ADD IDENTIFIED WITH bcrypt_password BY 'BCRYPTSECRET'", "BCRYPTSECRET"),
+        ("SELECT * FROM jdbc('jdbc:mysql://h:3306/db?user=u&password=JDBCSECRET', 't')", "JDBCSECRET"),
+        ("SELECT * FROM odbc('DSN=x;UID=u;PWD=ODBCSECRET', 'db', 't')", "ODBCSECRET"),
+        ("SELECT * FROM url('https://h/x.csv?access_token=URLSECRET', CSV)", "URLSECRET"),
+        ("SELECT * FROM url('https://h/x.csv?X-Amz-Signature=AMZSECRET&X-Amz-Credential=AKIA', CSV)", "AMZSECRET"),
+    ])
+    func secretsAreMasked(sql: String, secret: String) {
+        let redacted = SQLRedactor.redact(sql)
+        #expect(!redacted.contains(secret), "\(redacted)")
+    }
+
+    @Test func harmlessTextIsKept() {
+        #expect(SQLRedactor.redact("SELECT * FROM url('https://h/x.csv?format=csv&user=bob', CSV)") == "SELECT * FROM url('https://h/x.csv?format=csv&user=bob', CSV)")
+        #expect(SQLRedactor.redact("SELECT 'config=1', 'design=2'") == "SELECT 'config=1', 'design=2'")
+    }
+
+    @Test(arguments: [
+        ("Syntax error: failed at position 40 ('SYNTAXSECRET') (line 1, col 40): 'SYNTAXSECRET', sha256_password BY 'OTHER'. Expected one of: token", "SYNTAXSECRET"),
+        ("Syntax error: failed at position 40 ('SYNTAXSECRET') (line 1, col 40): 'SYNTAXSECRET', sha256_password BY 'OTHER'. Expected one of: token", "OTHER"),
+        ("Code: 499. DB::Exception: Access denied. While processing s3('https://b.s3.amazonaws.com/x.csv', 'AKIAEXAMPLE', 'S3SECRET')", "S3SECRET"),
+        ("Cannot connect: DefaultEndpointsProtocol=https;AccountName=a;AccountKey=MSGSECRET;EndpointSuffix=x", "MSGSECRET"),
+        ("Poco::Exception. https://user:URLPASS@host/x failed", "URLPASS"),
+    ])
+    func errorMessagesAreRedacted(message: String, secret: String) {
+        let redacted = SQLRedactor.redactMessage(message)
+        #expect(!redacted.contains(secret), "\(redacted)")
+    }
+
+    @Test func errorMessagesKeepTheirMeaning() {
+        let message = "Syntax error: failed at position 40 ('x') (line 1, col 40): x. Expected one of: token, identifier"
+        let redacted = SQLRedactor.redactMessage(message)
+        #expect(redacted.contains("failed at position 40"))
+        #expect(redacted.contains("Expected one of: token, identifier"))
+        #expect(SQLRedactor.redactMessage("Table default.t doesn't exist. (UNKNOWN_TABLE)") == "Table default.t doesn't exist. (UNKNOWN_TABLE)")
+    }
+}

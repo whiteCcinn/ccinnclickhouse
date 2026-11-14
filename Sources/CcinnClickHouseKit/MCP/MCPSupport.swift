@@ -134,7 +134,7 @@ public actor MCPAuditLog {
         if let statement { entry["statement"] = .string(String(SQLRedactor.redact(statement).prefix(20_000))) }
         entry["source"] = "mcp"
         if let rows { entry["rows"] = .int(Int64(rows)) }
-        if let error { entry["error"] = .string(String(error.prefix(2_000))) }
+        if let error { entry["error"] = .string(String(SQLRedactor.redactMessage(error).prefix(2_000))) }
         let line = JSONValue.object(entry).serialized() + "\n"
         let manager = FileManager.default
         try? manager.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true,

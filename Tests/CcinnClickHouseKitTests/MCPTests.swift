@@ -275,6 +275,19 @@ struct MCPToolTests {
         let permissions = try FileManager.default.attributesOfItem(atPath: audit.fileURL.path)[.posixPermissions] as? NSNumber
         #expect(permissions?.intValue == 0o600)
     }
+
+    @Test func auditLogRedactsErrorText() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ccinnch-audit-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let audit = MCPAuditLog(directory: directory)
+        await audit.record(tool: "run_query", connection: "Dev", statement: "SELECT 1", durationMilliseconds: 1, rows: nil,
+                           error: "Syntax error: failed at position 20 ('ERRSECRET') (line 1, col 20): 'ERRSECRET'. Expected one of: token")
+        await audit.record(tool: "run_query", connection: "Dev", statement: "SELECT 1", durationMilliseconds: 1, rows: nil,
+                           error: "While processing s3('https://b/x.csv', 'AKIA', 'S3ERRSECRET')")
+        let text = try String(contentsOf: audit.fileURL, encoding: .utf8)
+        #expect(!text.contains("ERRSECRET"))
+        #expect(text.contains("failed at position 20"))
+    }
 }
 
 @Suite("MCP client cache and profile revocation", .serialized)

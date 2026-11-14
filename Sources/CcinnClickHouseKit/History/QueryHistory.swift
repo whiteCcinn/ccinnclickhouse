@@ -52,6 +52,8 @@ public actor QueryHistoryStore {
     public func append(_ entry: QueryHistoryEntry) {
         var entry = entry
         entry.sql = SQLRedactor.redact(entry.sql)
+        // Server errors can echo the statement (syntax errors, "While processing s3(…)").
+        entry.errorMessage = entry.errorMessage.map { String(SQLRedactor.redactMessage($0).prefix(4_000)) }
         if entry.sql.count > maxStatementLength { entry.sql = String(entry.sql.prefix(maxStatementLength)) }
         var all = loadIfNeeded()
         // Re-running the latest statement replaces it instead of stacking duplicates.

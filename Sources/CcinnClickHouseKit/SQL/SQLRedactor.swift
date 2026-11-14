@@ -6,7 +6,9 @@ import Foundation
 /// - values of credential-like `name = 'value'` pairs (named collections, settings),
 /// - credential positions of table functions and engines (`mysql(host, db, table, user, password)`,
 ///   `remote(…, user, password)`, `s3(url, key, secret, …)`, …),
-/// and user:password in URLs is masked in every literal.
+/// and user:password in URLs plus credential-like `key=value` pairs (connection strings, JDBC/ODBC strings,
+/// URL query parameters) are masked in every literal. `redactMessage` cleans server error text, which can
+/// echo the statement.
 public enum SQLRedactor {
     static let sensitiveKeyFragments = ["password", "passwd", "secret", "access_key", "accesskey", "account_key", "token", "credential",
                                         "private_key", "privatekey", "sas", "auth", "_key_id"]
@@ -29,7 +31,7 @@ public enum SQLRedactor {
                 redactions[token.range] = "'***'"
             } else {
                 let text = lexer.text(of: token)
-                let masked = maskURLCredentials(text)
+                let masked = maskConnectionSecrets(maskURLCredentials(text))
                 if masked != text { redactions[token.range] = masked }
             }
         }
@@ -48,9 +50,12 @@ public enum SQLRedactor {
             guard tokens.indices.contains(position) else { return nil }
             return lexer.text(of: tokens[position]).uppercased()
         }
-        // IDENTIFIED BY '…' / IDENTIFIED WITH method BY|AS '…' (also `SALT '…'` after a hash)
+        // IDENTIFIED BY '…' / IDENTIFIED WITH method BY|AS '…' [, method BY '…' …] (also `SALT '…'`):
+        // every BY/AS literal after IDENTIFIED is a secret.
         if word(-1) == "BY" || word(-1) == "AS" {
-            if word(-2) == "IDENTIFIED" || word(-4) == "IDENTIFIED" { return true }
+            if tokens[..<index].contains(where: { $0.kind == .keyword || $0.kind == .identifier ? lexer.text(of: $0).uppercased() == "IDENTIFIED" : false }) {
+                return true
+            }
         }
         if word(-1) == "SALT" { return true }
         // PASSWORD '…', PASSWORD = '…', KEY '…' (dictionary sources), SECRET '…'
@@ -93,6 +98,28 @@ public enum SQLRedactor {
             position -= 1
         }
         return nil
+    }
+
+    /// Credential-like `key=value` pairs in connection strings (`AccountKey=…;`, `PWD=…;`), JDBC URLs and
+    /// URL query strings (`?password=…&`, `access_token=…`, `X-Amz-Signature=…`).
+    static let connectionSecretPattern = #"(?i)\b(AccountKey|SharedAccessKey|SharedAccessSignature|sig|PWD|Password|Passwd|Secret|SecretKey|"#
+        + #"Token|access_token|refresh_token|id_token|api_key|apikey|client_secret|private_key|X-Amz-Signature|X-Amz-Security-Token|"#
+        + #"aws_secret_access_key|AccessKeySecret)=([^;&'\s"]+)"#
+
+    static func maskConnectionSecrets(_ text: String) -> String {
+        guard text.contains("=") else { return text }
+        return text.replacingOccurrences(of: connectionSecretPattern, with: "$1=***", options: .regularExpression)
+    }
+
+    /// Server error text without credentials: the statement echo of syntax errors (`failed at position N
+    /// ('…') (line L, col C): …`) is dropped, string literals are redacted like SQL (`While processing
+    /// s3('url', 'key', 'secret')`), and URL credentials and connection-string secrets are masked.
+    public static func redactMessage(_ message: String) -> String {
+        var text = message.replacingOccurrences(of: #"(failed at position \d+)[^\n]*?(?=Expected|\n|$)"#, with: "$1 (statement text omitted). ",
+                                                options: .regularExpression)
+        text = redact(text)
+        text = maskURLCredentials(maskConnectionSecrets(text))
+        return text
     }
 
     /// `'https://user:pass@host/…'` → `'https://***@host/…'`.
