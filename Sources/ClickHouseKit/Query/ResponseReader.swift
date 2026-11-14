@@ -119,6 +119,13 @@ enum ResponseReader {
         }
         if stoppedEarly {
             response.cancel()
+            // An exception already received (held back or in the trailer) wins over the truncated rows;
+            // an incomplete last row is irrelevant because the result is truncated anyway.
+            do {
+                _ = try parser.finish(abruptly: false)
+            } catch let exception as ClickHouseServerException {
+                throw ClickHouseError.server(exception)
+            } catch {}
         } else {
             do {
                 let last = try parser.finish(abruptly: false)
