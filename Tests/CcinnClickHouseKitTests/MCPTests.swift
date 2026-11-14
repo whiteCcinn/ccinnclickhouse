@@ -276,3 +276,96 @@ struct MCPToolTests {
         #expect(permissions?.intValue == 0o600)
     }
 }
+
+@Suite("MCP client cache and profile revocation", .serialized)
+struct MCPRevocationTests {
+    final class Opened: @unchecked Sendable {
+        let lock = OSAllocatedUnfairLock<(opened: [String], closed: [String])>(initialState: ([], []))
+    }
+
+    final class Resource: Sendable {
+        let name: String
+        let healthy = OSAllocatedUnfairLock(initialState: true)
+        init(name: String) { self.name = name }
+    }
+
+    func makeCache(_ log: Opened, delay: Duration = .zero) -> KeyedResourceCache<String, Resource> {
+        KeyedResourceCache(opener: { key in
+            if delay > .zero { try await Task.sleep(for: delay) }
+            log.lock.withLock { $0.opened.append(key) }
+            return Resource(name: key)
+        }, isHealthy: { $0.healthy.withLock { $0 } }, close: { resource in log.lock.withLock { $0.closed.append(resource.name) } },
+        supersededGrace: .milliseconds(50))
+    }
+
+    @Test func aChangedKeyOpensANewValueAndClosesTheOld() async throws {
+        let log = Opened()
+        let cache = makeCache(log)
+        let id = UUID()
+        let first = try await cache.value(id: id, key: "read-write")
+        #expect(try await cache.value(id: id, key: "read-write") === first)
+        let downgraded = try await cache.value(id: id, key: "read-only")
+        #expect(downgraded !== first)
+        #expect(await eventually { log.lock.withLock { $0.closed } == ["read-write"] })
+        #expect(log.lock.withLock { $0.opened } == ["read-write", "read-only"])
+    }
+
+    @Test func unhealthyOrEvictedValuesAreReopened() async throws {
+        let log = Opened()
+        let cache = makeCache(log)
+        let id = UUID()
+        let first = try await cache.value(id: id, key: "k")
+        first.healthy.withLock { $0 = false } // e.g. the SSH tunnel process exited
+        let second = try await cache.value(id: id, key: "k")
+        #expect(second !== first)
+        await cache.evict(id: id)
+        let third = try await cache.value(id: id, key: "k")
+        #expect(third !== second)
+        #expect(log.lock.withLock { $0.opened.count } == 3)
+    }
+
+    @Test func aCancelledCallerCancelsAnOpenNobodyElseWaitsFor() async throws {
+        let log = Opened()
+        let cache = makeCache(log, delay: .seconds(5))
+        let call = Task { try await cache.value(id: UUID(), key: "slow") }
+        try await Task.sleep(for: .milliseconds(100))
+        let started = ContinuousClock.now
+        call.cancel()
+        await #expect(throws: ClickHouseError.self) { _ = try await call.value }
+        #expect(ContinuousClock.now - started < .seconds(2), "the cancelled call returned without waiting for the open")
+        #expect(log.lock.withLock { $0.opened }.isEmpty)
+    }
+
+    @Test func runningServerSeesAccessChangesWithoutRestart() async throws {
+        var writable = MCPToolTests.profiles[1]
+        writable.mcpAccess = .readWrite
+        let current = OSAllocatedUnfairLock(initialState: [writable])
+        let source = MCPProfileSource(defaultProfile: nil, forceReadOnly: false, load: { current.withLock { $0 } })
+        let tools = ClickHouseMCPTools(profiles: source, registry: MCPClientRegistry { _, _ in throw ClickHouseError(.network, "offline") },
+                                       audit: nil)
+        #expect(await tools.tools().contains { $0.name == "execute_statement" })
+        // The user switches the connection to Read-only in Settings while the server runs.
+        current.withLock { $0[0].mcpAccess = .readOnly }
+        #expect(await !tools.tools().contains { $0.name == "execute_statement" })
+        let refused = await tools.call(name: "execute_statement", arguments: ["sql": "DROP TABLE t"])
+        #expect(refused.isError)
+        // … and then Off.
+        current.withLock { $0[0].mcpAccess = .disabled }
+        let off = await tools.call(name: "list_databases", arguments: [:])
+        #expect(off.isError)
+        #expect(off.payload.stringValue?.contains("AI access") == true)
+        // An unreadable connections file means no connections (fail closed).
+        let broken = ClickHouseMCPTools(profiles: MCPProfileSource(defaultProfile: nil, forceReadOnly: false, load: { throw CocoaError(.fileReadCorruptFile) }),
+                                        registry: MCPClientRegistry { _, _ in throw ClickHouseError(.network, "offline") }, audit: nil)
+        #expect(await broken.call(name: "list_databases", arguments: [:]).isError)
+    }
+}
+
+func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if condition() { return true }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    return condition()
+}

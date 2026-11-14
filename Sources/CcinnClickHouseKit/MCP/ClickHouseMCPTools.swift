@@ -1,46 +1,175 @@
 import ClickHouseKit
 import ClickHouseWire
 import Foundation
+import os
 
-/// Opens (once) and caches a client per profile for the lifetime of the MCP process.
-public actor MCPClientRegistry {
-    public typealias Opener = @Sendable (ConnectionProfile, MCPAccess) async throws -> ClickHouseClient
+/// Caches one resource per profile id. It re-opens the resource when its key changes (the profile was
+/// edited or its AI access downgraded), when it is no longer healthy (a dead SSH tunnel), or after it was
+/// evicted following a connectivity failure. A cancelled caller cancels an open nobody else waits for.
+public actor KeyedResourceCache<Key: Hashable & Sendable, Value: Sendable> {
+    public typealias Opener = @Sendable (Key) async throws -> Value
 
-    private let opener: Opener
-    private var clients: [UUID: ClickHouseClient] = [:]
-    private var opening: [UUID: Task<ClickHouseClient, any Error>] = [:]
-
-    public init(opener: @escaping Opener) {
-        self.opener = opener
+    private struct Entry {
+        let key: Key
+        let value: Value
     }
 
-    public func client(for profile: ConnectionProfile, access: MCPAccess) async throws -> ClickHouseClient {
-        if let client = clients[profile.id] { return client }
-        if let pending = opening[profile.id] { return try await pending.value }
-        let opener = opener
-        let task = Task { try await opener(profile, access) }
-        opening[profile.id] = task
-        do {
-            let client = try await task.value
-            opening[profile.id] = nil
-            clients[profile.id] = client
-            return client
-        } catch {
-            opening[profile.id] = nil
-            throw error
+    /// One open in flight, shared by every caller asking for the same key.
+    private final class PendingOpen: Sendable {
+        let key: Key
+        let task: Task<Value, any Error>
+        private let waiters = OSAllocatedUnfairLock(initialState: 0)
+
+        init(key: Key, task: Task<Value, any Error>) {
+            self.key = key
+            self.task = task
+        }
+
+        func join() { waiters.withLock { $0 += 1 } }
+
+        /// A waiter was cancelled: the open is cancelled once nobody waits for it any more.
+        func leave() {
+            if waiters.withLock({ count -> Int in count -= 1; return count }) <= 0 { task.cancel() }
         }
     }
 
+    private let opener: Opener
+    private let isHealthy: @Sendable (Value) -> Bool
+    private let close: @Sendable (Value) async -> Void
+    /// A value whose open was superseded while a caller still uses it is closed after this grace period.
+    private let supersededGrace: Duration
+    private var entries: [UUID: Entry] = [:]
+    private var opening: [UUID: PendingOpen] = [:]
+
+    public init(opener: @escaping Opener, isHealthy: @escaping @Sendable (Value) -> Bool = { _ in true },
+                close: @escaping @Sendable (Value) async -> Void = { _ in }, supersededGrace: Duration = .seconds(150)) {
+        self.opener = opener
+        self.isHealthy = isHealthy
+        self.close = close
+        self.supersededGrace = supersededGrace
+    }
+
+    public func value(id: UUID, key: Key) async throws -> Value {
+        if let entry = entries[id] {
+            if entry.key == key, isHealthy(entry.value) { return entry.value }
+            entries[id] = nil
+            retire(entry.value, after: .zero)
+        }
+        let pending: PendingOpen
+        if let existing = opening[id], existing.key == key {
+            pending = existing
+        } else {
+            opening[id]?.task.cancel()
+            let opener = opener
+            pending = PendingOpen(key: key, task: Task { try await opener(key) })
+            opening[id] = pending
+        }
+        pending.join()
+        let result = await withTaskCancellationHandler { await pending.task.result } onCancel: { pending.leave() }
+        let isCurrent = opening[id] === pending
+        if isCurrent { opening[id] = nil }
+        let value: Value
+        do {
+            value = try result.get()
+        } catch {
+            if Task.isCancelled || error is CancellationError { throw ClickHouseError.cancelled() }
+            throw error
+        }
+        if isCurrent {
+            // Callers asking for the same key share this open, so an existing entry is never this key.
+            if let stale = entries[id] { retire(stale.value, after: .zero) }
+            entries[id] = Entry(key: key, value: value)
+        } else {
+            // A newer key replaced this open while it ran: serve this call, then close it.
+            retire(value, after: supersededGrace)
+        }
+        if Task.isCancelled { throw ClickHouseError.cancelled() }
+        return value
+    }
+
+    /// Drops the cached value (after a connectivity failure) so the next call opens a fresh one.
+    public func evict(id: UUID) {
+        guard let entry = entries.removeValue(forKey: id) else { return }
+        retire(entry.value, after: .zero)
+    }
+
     public func closeAll() async {
-        let open = Array(clients.values)
-        clients.removeAll()
-        for client in open { await client.close() }
+        let open = entries.values.map(\.value)
+        entries.removeAll()
+        for pending in opening.values { pending.task.cancel() }
+        opening.removeAll()
+        for value in open { await close(value) }
+    }
+
+    private func retire(_ value: Value, after delay: Duration) {
+        let close = close
+        Task {
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            await close(value)
+        }
+    }
+}
+
+/// A profile together with the AI access it was opened for: any change opens a new client, so a
+/// downgrade from Read & write never keeps using a client opened without `readonly=1`.
+public struct MCPClientKey: Hashable, Sendable {
+    public let profile: ConnectionProfile
+    public let access: MCPAccess
+}
+
+/// Opens and caches a client per profile for the MCP process (re-opened on profile/access changes,
+/// dead tunnels and connectivity failures).
+public actor MCPClientRegistry {
+    public typealias Opener = @Sendable (ConnectionProfile, MCPAccess) async throws -> ClickHouseClient
+
+    private let cache: KeyedResourceCache<MCPClientKey, ClickHouseClient>
+
+    public init(opener: @escaping Opener) {
+        cache = KeyedResourceCache(opener: { key in try await opener(key.profile, key.access) },
+                                   isHealthy: { $0.isTunnelAlive }, close: { await $0.close() })
+    }
+
+    public func client(for profile: ConnectionProfile, access: MCPAccess) async throws -> ClickHouseClient {
+        try await cache.value(id: profile.id, key: MCPClientKey(profile: profile, access: access))
+    }
+
+    public func evict(profileID: UUID) async {
+        await cache.evict(id: profileID)
+    }
+
+    public func closeAll() async {
+        await cache.closeAll()
+    }
+}
+
+/// The saved connections as the MCP server sees them on each call, so a change made in Settings (AI
+/// access switched off or downgraded, a host edited) applies to a running server without a restart.
+/// A file that cannot be read yields no connections (fail closed).
+public struct MCPProfileSource: Sendable {
+    private let load: @Sendable () throws -> [ConnectionProfile]
+    public let defaultProfile: String?
+    public let forceReadOnly: Bool
+
+    public init(defaultProfile: String?, forceReadOnly: Bool, load: @escaping @Sendable () throws -> [ConnectionProfile]) {
+        self.load = load
+        self.defaultProfile = defaultProfile
+        self.forceReadOnly = forceReadOnly
+    }
+
+    /// A fixed set of profiles (tests, one-shot tools).
+    public init(_ resolver: MCPProfileResolver) {
+        let profiles = resolver.profiles
+        self.init(defaultProfile: resolver.defaultProfile, forceReadOnly: resolver.forceReadOnly, load: { profiles })
+    }
+
+    public func resolver() -> MCPProfileResolver {
+        MCPProfileResolver(profiles: (try? load()) ?? [], defaultProfile: defaultProfile, forceReadOnly: forceReadOnly)
     }
 }
 
 /// The ClickHouse tool set of the MCP server (design D15, shared ccinn MCP design).
 public struct ClickHouseMCPTools: MCPToolProvider {
-    public let resolver: MCPProfileResolver
+    public let profiles: MCPProfileSource
     public let registry: MCPClientRegistry
     public let audit: MCPAuditLog?
 
@@ -49,10 +178,14 @@ public struct ClickHouseMCPTools: MCPToolProvider {
     public static let defaultTimeout = 30.0
     public static let maxTimeout = 120.0
 
-    public init(resolver: MCPProfileResolver, registry: MCPClientRegistry, audit: MCPAuditLog?) {
-        self.resolver = resolver
+    public init(profiles: MCPProfileSource, registry: MCPClientRegistry, audit: MCPAuditLog?) {
+        self.profiles = profiles
         self.registry = registry
         self.audit = audit
+    }
+
+    public init(resolver: MCPProfileResolver, registry: MCPClientRegistry, audit: MCPAuditLog?) {
+        self.init(profiles: MCPProfileSource(resolver), registry: registry, audit: audit)
     }
 
     // MARK: Definitions
@@ -145,7 +278,11 @@ public struct ClickHouseMCPTools: MCPToolProvider {
                             required: ["sql"]), readOnly: false, destructive: true, idempotent: false)
 
     public func tools() async -> [MCPTool] {
-        resolver.anyWritable ? Self.definitions + [Self.executeDefinition] : Self.definitions
+        Self.tools(for: profiles.resolver())
+    }
+
+    static func tools(for resolver: MCPProfileResolver) -> [MCPTool] {
+        resolver.anyWritable ? definitions + [executeDefinition] : definitions
     }
 
     // MARK: Calls
@@ -153,6 +290,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
     /// Collects audit details while a tool runs.
     final class CallContext: @unchecked Sendable {
         var connection: String?
+        var profileID: UUID?
         var statement: String?
         var rows: Int?
     }
@@ -167,6 +305,10 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         } catch let error as MCPToolError {
             result = .failure(error.message)
         } catch let error as ClickHouseError {
+            // A broken connection (network, TLS, SSH tunnel) is re-opened on the next call.
+            if [.network, .tls, .sshTunnel].contains(error.kind), let profileID = context.profileID {
+                await registry.evict(profileID: profileID)
+            }
             var message = error.message
             if let code = error.code { message += " (code \(code)\(error.name.map { ", \($0)" } ?? ""))" }
             if error.code == ClickHouseError.Code.readonly { message += " The connection is read-only for AI access." }
@@ -184,7 +326,9 @@ public struct ClickHouseMCPTools: MCPToolProvider {
     }
 
     private func dispatch(_ name: String, _ args: Arguments, _ context: CallContext) async throws -> JSONValue {
-        let definitions = await tools()
+        // Profiles and their AI access are re-read for every call (revocation takes effect at once).
+        let resolver = profiles.resolver()
+        let definitions = Self.tools(for: resolver)
         guard let definition = definitions.first(where: { $0.name == name }) else {
             if name == Self.executeDefinition.name {
                 throw MCPToolError("execute_statement is only available when a connection allows read-write AI access.")
@@ -192,9 +336,10 @@ public struct ClickHouseMCPTools: MCPToolProvider {
             throw MCPToolError("Unknown tool “\(name)”. Available tools: \(definitions.map(\.name).joined(separator: ", ")).")
         }
         try args.validate(against: definition.inputSchema)
-        if name == "list_connections" { return listConnections() }
+        if name == "list_connections" { return Self.listConnections(resolver) }
         let resolved = try resolver.resolve(args.string("connection"))
         context.connection = resolved.profile.displayName
+        context.profileID = resolved.profile.id
         // Refuse what can be refused without a connection: nothing is opened or sent for rejected SQL.
         switch name {
         case "run_query":
@@ -246,7 +391,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         }
     }
 
-    private func listConnections() -> JSONValue {
+    private static func listConnections(_ resolver: MCPProfileResolver) -> JSONValue {
         ["connections": .array(resolver.enabledProfiles.map { profile in
             [
                 "name": .string(profile.displayName),

@@ -154,6 +154,9 @@ public final class ClickHouseClient: Sendable {
 
     public var isTunnelled: Bool { tunnel != nil }
 
+    /// False once the SSH tunnel process this client depends on has exited.
+    public var isTunnelAlive: Bool { tunnel?.isRunning ?? true }
+
     /// The endpoint is served by more than one node (a load balancer or proxy).
     public var isLoadBalanced: Bool { seenNodes.withLock { $0.count > 1 } }
 

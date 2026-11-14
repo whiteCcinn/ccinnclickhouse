@@ -73,7 +73,10 @@ enum MCPCommand {
             // Read-only AI access: every request of this client carries readonly=1.
             return try await ClientOpener.open(profile: profile, password: password, sshSecret: sshSecret, readOnlyOverride: access != .readWrite)
         }
-        let provider = ClickHouseMCPTools(resolver: resolver, registry: registry,
+        // Profiles are re-read on every call, so switching AI access off (or down to read-only) in
+        // Settings applies to this running server at once.
+        let source = MCPProfileSource(defaultProfile: profile, forceReadOnly: readOnly, load: { try repository.load() })
+        let provider = ClickHouseMCPTools(profiles: source, registry: registry,
                                           audit: MCPAuditLog(directory: ProfileRepository.defaultDirectory))
         let output = StandardOutput()
         let server = MCPServer(info: MCPServerInfo(name: "ccinnclickhouse", title: "CcinnClickHouse", version: version, instructions: instructions),
