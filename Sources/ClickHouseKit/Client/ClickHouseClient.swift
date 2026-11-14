@@ -1,0 +1,254 @@
+import ClickHouseWire
+import Foundation
+import os
+
+/// Entry point for one ClickHouse endpoint: server facts, capabilities, statement execution,
+/// cancellation and the metadata / insight / operation APIs (see the `ClickHouseClient+*.swift` extensions).
+public final class ClickHouseClient: Sendable {
+    public let configuration: ConnectionConfiguration
+    public let serverInfo: ServerInfo
+    public let capabilities: ConnectionCapabilities
+    public let systemSchema: SystemSchema
+    let builder: RequestBuilder
+    let transport: any ClickHouseTransport
+    private let tunnel: SSHTunnel?
+    /// Display names of the nodes that answered (more than one → load-balanced endpoint).
+    private let seenNodes = OSAllocatedUnfairLock<Set<String>>(initialState: [])
+
+    /// Default per-statement budget for metadata queries issued by the app itself.
+    public static let metadataTimeout: Double = 30
+
+    init(configuration: ConnectionConfiguration, serverInfo: ServerInfo, capabilities: ConnectionCapabilities, systemSchema: SystemSchema,
+         builder: RequestBuilder, transport: any ClickHouseTransport, tunnel: SSHTunnel?, seenNodes: Set<String>) {
+        self.configuration = configuration
+        self.serverInfo = serverInfo
+        self.capabilities = capabilities
+        self.systemSchema = systemSchema
+        self.builder = builder
+        self.transport = transport
+        self.tunnel = tunnel
+        self.seenNodes.withLock { $0.formUnion(seenNodes) }
+    }
+
+    // MARK: Connect
+
+    /// Probes the server (version, user, settings permissions) and loads the system schema.
+    /// The client takes ownership of `tunnel` and closes it in `close()`.
+    public static func connect(_ configuration: ConnectionConfiguration, tunnel: SSHTunnel? = nil,
+                               transportFactory: TransportFactory = Transports.urlSession) async throws -> ClickHouseClient {
+        if Task.isCancelled {
+            tunnel?.close()
+            throw ClickHouseError.cancelled()
+        }
+        let effective = tunnel.map { configuration.with(endpoint: $0.localAddress) } ?? configuration
+        guard let baseURL = effective.baseURL else {
+            tunnel?.close()
+            throw ClickHouseError(.invalidArgument, "Enter a valid host and port")
+        }
+        let transport = transportFactory(effective)
+        do {
+            var nodes = Set<String>()
+            let (probe, capabilities) = try await Deadline.run(seconds: max(1, configuration.connectTimeout) * 2, timeoutError: {
+                ClickHouseError(.timeout, "\(configuration.endpoint) did not answer within \(Int(configuration.connectTimeout * 2)) s")
+            }) {
+                var learned = ConnectionCapabilities()
+                let info = try await Self.probe(effective, baseURL: baseURL, transport: transport, capabilities: &learned)
+                return (info, learned)
+            }
+            if let name = probe.displayName { nodes.insert(name) }
+            let builder = RequestBuilder(configuration: effective, baseURL: baseURL, capabilities: capabilities)
+            let schemaResult = try await Self.run(SystemSchema.loadQuery, builder: builder, transport: transport,
+                                                  options: .metadata(timeout: max(configuration.connectTimeout, 10)))
+            if let name = schemaResult.result.serverDisplayName { nodes.insert(name) }
+            let client = ClickHouseClient(configuration: configuration, serverInfo: probe, capabilities: capabilities,
+                                          systemSchema: SystemSchema(result: schemaResult.result), builder: builder, transport: transport,
+                                          tunnel: tunnel, seenNodes: nodes)
+            return client
+        } catch {
+            transport.close()
+            tunnel?.close()
+            throw error
+        }
+    }
+
+    static let probeSQL = """
+        SELECT version() AS version, timezone() AS timezone, currentUser() AS user, hostName() AS host, \
+        uptime() AS uptime, currentDatabase() AS database, getSetting('readonly') AS readonly
+        """
+    static let minimalProbeSQL = "SELECT version() AS version, timezone() AS timezone, currentUser() AS user, hostName() AS host, currentDatabase() AS database"
+
+    /// Runs the probe, learning which settings may be sent (design D7).
+    static func probe(_ configuration: ConnectionConfiguration, baseURL: URL, transport: any ClickHouseTransport,
+                      capabilities: inout ConnectionCapabilities) async throws -> ServerInfo {
+        var sql = probeSQL
+        for _ in 0..<8 {
+            let builder = RequestBuilder(configuration: configuration, baseURL: baseURL, capabilities: capabilities)
+            do {
+                let outcome = try await run(sql, builder: builder, transport: transport,
+                                            options: QueryOptions(purpose: "meta", limits: .metadata, timeout: nil, waitEndOfQuery: true))
+                let record = outcome.result.first
+                return ServerInfo(versionString: record?.text("version") ?? "unknown", timeZone: record?.text("timezone"),
+                                  currentUser: record?.text("user"), hostName: record?.text("host"),
+                                  displayName: outcome.result.serverDisplayName ?? record?.text("host"),
+                                  uptimeSeconds: record?.int("uptime"), defaultDatabase: record?.text("database"),
+                                  readonlyLevel: record?.int("readonly").map { Int(clamping: $0) })
+            } catch let error as ClickHouseError where error.kind == .server {
+                if error.code == ClickHouseError.Code.readonly, !capabilities.settingsLocked, error.message.contains("Cannot modify") {
+                    capabilities.settingsLocked = true
+                    continue
+                }
+                if error.code == ClickHouseError.Code.unknownSetting, let name = unknownSettingName(error.message),
+                   !capabilities.unsupportedSettings.contains(name) {
+                    capabilities.unsupportedSettings.insert(name)
+                    continue
+                }
+                if sql != minimalProbeSQL, error.code != nil, !ClickHouseError.authenticationCodes.contains(error.code ?? 0) {
+                    // e.g. getSetting/uptime unavailable on an old or restricted server
+                    sql = minimalProbeSQL
+                    continue
+                }
+                throw error
+            }
+        }
+        throw ClickHouseError(.server, "The server rejected every probe query")
+    }
+
+    /// `Unknown setting 'x'` / `Setting x is neither a builtin setting…`.
+    static func unknownSettingName(_ message: String) -> String? {
+        if let match = message.firstMatch(of: /[Ss]etting '?([A-Za-z0-9_]+)'?/) { return String(match.output.1) }
+        return nil
+    }
+
+    public func close() async {
+        transport.close()
+        tunnel?.close()
+    }
+
+    public var isTunnelled: Bool { tunnel != nil }
+
+    /// The endpoint is served by more than one node (a load balancer or proxy).
+    public var isLoadBalanced: Bool { seenNodes.withLock { $0.count > 1 } }
+
+    public var nodesSeen: Set<String> { seenNodes.withLock { $0 } }
+
+    func noteNode(_ name: String?) {
+        guard let name, !name.isEmpty else { return }
+        seenNodes.withLock { _ = $0.insert(name) }
+    }
+
+    // MARK: Statements
+
+    /// Runs one statement. Cancelling the calling task aborts the request and kills the query on the server.
+    public func run(_ sql: String, options: QueryOptions = QueryOptions()) async throws -> QueryResult {
+        let queryID = options.queryID ?? RequestBuilder.makeQueryID(purpose: options.purpose)
+        var options = options
+        options.queryID = queryID
+        let builder = builder
+        let transport = transport
+        let work: @Sendable () async throws -> ResponseReader.Outcome = { [options] in
+            try await Self.run(sql, builder: builder, transport: transport, options: options)
+        }
+        do {
+            let outcome: ResponseReader.Outcome
+            if let timeout = options.timeout, timeout.isFinite {
+                outcome = try await Deadline.run(seconds: timeout, timeoutError: {
+                    ClickHouseError(.timeout, "The statement did not finish within \(Int(timeout)) s")
+                }, work)
+            } else {
+                outcome = try await work()
+            }
+            noteNode(outcome.result.serverDisplayName)
+            if outcome.stoppedEarly { killInBackground(queryID: queryID) }
+            return outcome.result
+        } catch let error as ClickHouseError where error.kind == .cancelled || error.kind == .timeout {
+            // The request was abandoned; the query id is unique, so this kill can never hit another statement.
+            killInBackground(queryID: queryID)
+            throw error
+        } catch is CancellationError {
+            killInBackground(queryID: queryID)
+            throw ClickHouseError.cancelled()
+        }
+    }
+
+    static func run(_ sql: String, builder: RequestBuilder, transport: any ClickHouseTransport, options: QueryOptions,
+                    freshConnection: Bool = false) async throws -> ResponseReader.Outcome {
+        let queryID = options.queryID ?? RequestBuilder.makeQueryID(purpose: options.purpose)
+        let request = try builder.request(sql: sql, queryID: queryID, options: options, freshConnection: freshConnection)
+        let response = try await transport.send(request)
+        return try await withTaskCancellationHandler {
+            try await ResponseReader.read(response, queryID: queryID, limits: options.limits, onResponse: options.onResponse)
+        } onCancel: {
+            response.cancel()
+        }
+    }
+
+    /// Runs a metadata statement (buffered on the server, metadata limits and timeout).
+    public func execute(_ sql: String, timeout: Double? = ClickHouseClient.metadataTimeout) async throws -> QueryResult {
+        try await run(sql, options: .metadata(timeout: timeout))
+    }
+
+    /// Runs an optional metadata statement: `nil` when the server rejects it (unknown table on an older
+    /// version, missing privilege). Timeouts, network errors and cancellation still propagate, so a slow
+    /// cluster never yields silently incomplete metadata.
+    public func tolerant(_ sql: String, timeout: Double? = ClickHouseClient.metadataTimeout) async throws -> QueryResult? {
+        do {
+            return try await execute(sql, timeout: timeout)
+        } catch let error as ClickHouseError where error.kind == .server {
+            return nil
+        }
+    }
+
+    /// Opens an editor session (keeps `USE`/`SET` state across statements and reconnects).
+    public func openSession(database: String? = nil) -> SQLSession {
+        SQLSession(client: self, database: database ?? configuration.database)
+    }
+
+    // MARK: Kill
+
+    public enum KillOutcome: Sendable, Equatable {
+        /// The server found the query; `status` is `finished`, `waiting` or `pending`.
+        case killed(status: String?)
+        /// No node reached knows this query (it may already have finished).
+        case notFound
+    }
+
+    /// `KILL QUERY WHERE query_id = …` (design D5). When the query may run on another node (the endpoint
+    /// is load-balanced, or the caller knows it runs on a different host) the kill is retried on fresh
+    /// connections and finally sent `ON CLUSTER` when a cluster is known.
+    @discardableResult
+    public func killQuery(queryID: String, cluster: String? = nil, onAnotherNode: Bool = false, sync: Bool = false) async throws -> KillOutcome {
+        let sql = "KILL QUERY WHERE query_id = \(SQLText.literal(queryID)) \(sync ? "SYNC" : "ASYNC")"
+        let remote = onAnotherNode || isLoadBalanced
+        let attempts = remote ? 8 : 1
+        let builder = builder
+        let transport = transport
+        return try await Deadline.run(seconds: 30, timeoutError: { ClickHouseError(.timeout, "The server did not answer KILL QUERY in time") }) {
+            for attempt in 0..<attempts {
+                try Task.checkCancellation()
+                let outcome = try await Self.run(sql, builder: builder, transport: transport,
+                                                 options: QueryOptions(purpose: "kill", limits: .metadata, timeout: 10, waitEndOfQuery: true,
+                                                                       readOnly: false),
+                                                 freshConnection: attempt > 0)
+                if let row = outcome.result.first {
+                    return KillOutcome.killed(status: row.text("kill_status"))
+                }
+            }
+            guard remote, let cluster = cluster ?? self.configuration.defaultCluster, !cluster.isEmpty else {
+                return KillOutcome.notFound
+            }
+            do {
+                let onCluster = "KILL QUERY ON CLUSTER \(SQLText.quoteIdentifier(cluster)) WHERE query_id = \(SQLText.literal(queryID)) ASYNC"
+                let outcome = try await Self.run(onCluster, builder: builder, transport: transport,
+                                                 options: QueryOptions(purpose: "kill", limits: .metadata, timeout: 15, waitEndOfQuery: true,
+                                                                       readOnly: false))
+                return outcome.result.rows.isEmpty ? KillOutcome.notFound : KillOutcome.killed(status: nil)
+            } catch let error as ClickHouseError where error.kind == .server {
+                return KillOutcome.notFound
+            }
+        }
+    }
+
+    func killInBackground(queryID: String) {
+        Task.detached { [self] in _ = try? await killQuery(queryID: queryID) }
+    }
+}
