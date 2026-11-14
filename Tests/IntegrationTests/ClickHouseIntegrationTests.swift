@@ -87,7 +87,8 @@ struct ClickHouseIntegrationTests {
         let client = try await ITEnvironment.connect()
         defer { Task { await client.close() } }
         do {
-            _ = try await client.run("SELECT number, throwIf(number = 200000) FROM numbers(300000) SETTINGS max_block_size = 1000")
+            _ = try await client.run("SELECT number, throwIf(number = 200000) FROM numbers(300000) SETTINGS max_block_size = 1000",
+                                     options: QueryOptions(limits: RowLimits(maxRows: 1_000_000)))
             Issue.record("expected an exception")
         } catch let error as ClickHouseError {
             #expect(error.code == 395)

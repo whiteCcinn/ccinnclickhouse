@@ -375,3 +375,23 @@ struct BinaryValueTests {
         #expect(result.binaryCells.count == 1)
     }
 }
+
+@Suite("Exceptions beyond limits", .serialized)
+struct ExceptionBeyondLimitTests {
+    @Test func exceptionInTheSameChunkWinsOverTheRowLimit() async throws {
+        let rows = (0..<5_000).map { "\($0)\n" }.joined()
+        let server = try await FakeClickHouseServer { request in
+            if let answer = FakeAnswers.standard(request) { return answer }
+            return .tsv("n\nUInt64\n" + rows + "Code: 241. DB::Exception: Memory limit exceeded. (MEMORY_LIMIT_EXCEEDED) (version 23.8.16.16 (official build))\n")
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        do {
+            _ = try await client.run("SELECT big", options: QueryOptions(limits: RowLimits(maxRows: 10)))
+            Issue.record("expected the server exception")
+        } catch let error as ClickHouseError {
+            #expect(error.code == 241)
+        }
+    }
+}

@@ -78,6 +78,11 @@ enum ResponseReader {
                 let parsed = try parser.consume(chunk)
                 response.acknowledge(chunk.count)
                 collectBinary()
+                if parser.isInTrailer {
+                    // The server reported an exception after these rows: it wins over any limit.
+                    rows += parsed
+                    break
+                }
                 if rows.count + parsed.count > limits.maxRows {
                     // More rows than allowed exist: keep the first `maxRows` and stop reading.
                     rows += parsed.prefix(max(0, limits.maxRows - rows.count))
