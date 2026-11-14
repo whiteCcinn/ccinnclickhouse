@@ -651,3 +651,41 @@ struct SplitExceptionFramingTests {
         }
     }
 }
+
+@Suite("Transport start after an early completion", .serialized)
+struct TransportEarlyCompletionTests {
+    /// A cancel that lands before `start` runs cancels a task that was never resumed; URLSession reports
+    /// its completion before `start` stores the continuation. `start` must still return.
+    @Test func startAfterTheTaskAlreadyCompletedThrows() async throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: URL(string: "http://127.0.0.1:9/")!)
+        let delegate = StreamingTaskDelegate(trust: TrustPolicy(tls: TLSOptions(), serverName: nil))
+        task.delegate = delegate
+        task.cancel()
+        #expect(await eventually { task.state == .completed })
+        try await Task.sleep(for: .milliseconds(100))
+        let finished = OSAllocatedUnfairLock(initialState: false)
+        let start = Task {
+            defer { finished.withLock { $0 = true } }
+            _ = try await delegate.start(task)
+        }
+        let returned = await eventually(timeout: .seconds(2)) { finished.withLock { $0 } }
+        #expect(returned, "start() returned")
+        if returned { await #expect(throws: ClickHouseError.self) { try await start.value } }
+    }
+
+    /// The caller is cancelled before the request starts: `send` fails fast instead of hanging.
+    @Test func sendFromACancelledTaskReturns() async throws {
+        let server = try await FakeClickHouseServer { request in FakeAnswers.standard(request) ?? .tsv("x\nUInt8\n1\n") }
+        defer { server.stop() }
+        let transport = URLSessionTransport()
+        defer { transport.close() }
+        for _ in 0..<50 {
+            let request = HTTPRequest(url: URL(string: "http://127.0.0.1:\(server.port)/?query=SELECT%201")!, method: "POST", headers: [:], body: Data(), timeout: 5)
+            let attempt = Task { _ = try await transport.send(request) }
+            attempt.cancel()
+            _ = try? await attempt.value
+        }
+    }
+}

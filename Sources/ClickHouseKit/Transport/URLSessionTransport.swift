@@ -156,6 +156,9 @@ final class StreamingTaskDelegate: NSObject, URLSessionDataDelegate, @unchecked 
         var buffered = 0
         var suspended = false
         var completed = false
+        /// The completion error when the task finished before `start` stored its continuation (a cancel
+        /// that landed before the request was resumed).
+        var earlyCompletion: (any Error)?
     }
 
     private let trust: TrustPolicy
@@ -167,13 +170,28 @@ final class StreamingTaskDelegate: NSObject, URLSessionDataDelegate, @unchecked 
 
     func start(_ task: URLSessionDataTask) async throws -> HTTPStreamingResponse {
         try await withCheckedThrowingContinuation { continuation in
-            let alreadyCancelled = state.withLock { state -> Bool in
+            // The task may already have completed (cancelled before it was ever resumed): then nobody
+            // would resume this continuation, so answer with the recorded completion right away.
+            let earlyCompletion = state.withLock { state -> (any Error)? in
+                if state.completed { return state.earlyCompletion ?? ClickHouseError.cancelled() }
                 state.responseContinuation = continuation
                 state.task = task
-                return false
+                return nil
             }
-            if !alreadyCancelled { task.resume() }
+            if let earlyCompletion {
+                continuation.resume(throwing: earlyCompletion)
+            } else {
+                task.resume()
+            }
         }
+    }
+
+    /// The error `start` reports when the task completed without a response.
+    static func responseError(_ error: (any Error)?) -> ClickHouseError {
+        if let urlError = error as? URLError, urlError.code == .networkConnectionLost {
+            return ClickHouseError(.network, "The connection to the server was lost", isConnectionLostBeforeResponse: true)
+        }
+        return ClickHouseError.transport(error ?? URLError(.badServerResponse))
     }
 
     // MARK: Back-pressure
@@ -235,6 +253,7 @@ final class StreamingTaskDelegate: NSObject, URLSessionDataDelegate, @unchecked 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         let (responseContinuation, bodyContinuation) = state.withLock { state in
             state.completed = true
+            if state.responseContinuation == nil, state.bodyContinuation == nil { state.earlyCompletion = Self.responseError(error) }
             defer {
                 state.responseContinuation = nil
                 state.bodyContinuation = nil
@@ -242,14 +261,7 @@ final class StreamingTaskDelegate: NSObject, URLSessionDataDelegate, @unchecked 
             }
             return (state.responseContinuation, state.bodyContinuation)
         }
-        if let responseContinuation {
-            if let urlError = error as? URLError, urlError.code == .networkConnectionLost {
-                responseContinuation.resume(throwing: ClickHouseError(.network, "The connection to the server was lost",
-                                                                      isConnectionLostBeforeResponse: true))
-            } else {
-                responseContinuation.resume(throwing: ClickHouseError.transport(error ?? URLError(.badServerResponse)))
-            }
-        }
+        responseContinuation?.resume(throwing: Self.responseError(error))
         if let error {
             bodyContinuation?.finish(throwing: ClickHouseError.transport(error))
         } else {
