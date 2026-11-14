@@ -256,3 +256,14 @@ struct ExternalAccessGuardTests {
         #expect(ReadOnlySQLGuard.check(sql) == nil, "\(sql) → \(ReadOnlySQLGuard.check(sql) ?? "")")
     }
 }
+
+@Suite("Read-only editor batches")
+struct ReadOnlyBatchTests {
+    @Test func editorBatchesOnReadOnlyConnectionsUseTheGuard() {
+        #expect(ReadOnlySQLGuard.firstRefusal(in: ["USE shop", "SELECT 1", "SHOW TABLES"]) == nil)
+        #expect(ReadOnlySQLGuard.firstRefusal(in: ["SELECT 1", "SELECT * FROM url('http://127.0.0.1:18199/x', CSV)"])?.sql.hasPrefix("SELECT * FROM url") == true)
+        #expect(ReadOnlySQLGuard.firstRefusal(in: ["SET max_threads = 1"]) != nil)
+        #expect(ReadOnlySQLGuard.firstRefusal(in: ["SELECT 1 SETTINGS readonly = 0"]) != nil)
+        #expect(ReadOnlySQLGuard.firstRefusal(in: ["SELECT 1", "TRUNCATE TABLE t"])?.sql == "TRUNCATE TABLE t")
+    }
+}

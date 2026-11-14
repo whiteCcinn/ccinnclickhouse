@@ -238,10 +238,10 @@ final class SQLTabModel {
                 stopProgress()
             }
             let texts = statements.map(\.text)
-            if workspace.client.configuration.readOnly, let write = texts.first(where: { SQLStatementKind.of($0).isMutation }) {
-                // The server would refuse it too (readonly=1); say so before sending anything.
-                let outcome = StatementOutcome(index: 0, sql: write, executedSQL: write, kind: SQLStatementKind.of(write))
-                outcome.errorMessage = "This connection is read-only: statements that change data, schema or server state are not sent."
+            if workspace.client.configuration.readOnly, let refusal = ReadOnlySQLGuard.firstRefusal(in: texts) {
+                // The server refuses these too (readonly=1, verified at connect); say so before sending anything.
+                let outcome = StatementOutcome(index: 0, sql: refusal.sql, executedSQL: refusal.sql, kind: SQLStatementKind.of(refusal.sql))
+                outcome.errorMessage = "This connection is read-only. \(refusal.reason)"
                 outcome.isRunning = false
                 outcomes = [outcome]
                 return

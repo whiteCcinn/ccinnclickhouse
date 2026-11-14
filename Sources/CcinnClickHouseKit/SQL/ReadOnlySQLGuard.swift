@@ -86,6 +86,15 @@ public enum ReadOnlySQLGuard {
         return scan(words, from: queryStart)
     }
 
+    /// The first statement of an editor batch on a read-only connection that the guard refuses. `USE`
+    /// is allowed there: it only switches the session's database (ClickHouse allows it at readonly=1).
+    public static func firstRefusal(in statements: [String]) -> (sql: String, reason: String)? {
+        for statement in statements where SQLStatementKind.of(statement) != .use {
+            if let reason = check(statement) { return (statement, reason) }
+        }
+        return nil
+    }
+
     /// Index of the query after `EXPLAIN [kind] [setting = value, …]`; `nil` when no SELECT follows.
     static func explainQueryStart(_ words: StatementWords) -> Int? {
         var index = 1
