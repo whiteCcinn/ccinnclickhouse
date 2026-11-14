@@ -67,6 +67,19 @@ public struct TSVResultParser: Sendable {
     /// The stream switched to an exception/garbage trailer; no more rows will be produced.
     public var isInTrailer: Bool { trailer != nil }
 
+    /// The trailer holds everything worth reading: the closing `<len> <tag>\r\n__exception__` frame
+    /// (26.x), a newline-terminated `Code: … (version …)` line (earlier versions), or the size cap.
+    /// Until then the exception text may still be arriving in later network chunks.
+    public var isTrailerComplete: Bool {
+        guard let trailer else { return false }
+        if trailer.count >= Self.maxTrailerBytes { return true }
+        let text = String(decoding: trailer, as: UTF8.self)
+        if let exceptionTag {
+            return text.range(of: " \(exceptionTag)\r\n__exception__") != nil
+        }
+        return text.contains("(version ") && trailer.last == 0x0A
+    }
+
     // MARK: Feeding
 
     public mutating func consume(_ data: Data) throws -> [[String?]] {

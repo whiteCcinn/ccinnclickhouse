@@ -602,3 +602,52 @@ struct RetryReachedServerTests {
         #expect(server.requests(containing: "INSERT INTO t").count == 1)
     }
 }
+
+@Suite("Exception framing split across network chunks", .serialized)
+struct SplitExceptionFramingTests {
+    /// 26.x: the `__exception__` marker ends one chunk, the tag and message arrive later. The reader must
+    /// keep reading after entering the trailer instead of finishing on the partial frame.
+    @Test(arguments: [true, false])
+    func taggedExceptionSplitAcrossChunks(breakChunking: Bool) async throws {
+        let tag = "qrstuvwxyzabcdef"
+        let message = "Code: 241. DB::Exception: Memory limit (total) exceeded. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))\n"
+        var rows = "n\nUInt64\n"
+        for value in 0..<2_000 { rows += "\(value)\n" }
+        var response = FakeClickHouseServer.Response.tsv("", headers: ["X-ClickHouse-Exception-Tag": tag, "Content-Type": "text/tab-separated-values; charset=UTF-8"])
+        response.chunks = [Data((rows + "\r\n__exception__\r\n").utf8), Data("\(tag)\r\n\(message)\(message.utf8.count) \(tag)\r\n__exception__\r\n".utf8)]
+        response.chunkDelay = .milliseconds(200)
+        response.breakChunking = breakChunking
+        let framed = response
+        let server = try await FakeClickHouseServer { request in FakeAnswers.standard(request) ?? framed }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        do {
+            _ = try await client.run("SELECT number FROM numbers(1e9)")
+            Issue.record("expected the server exception")
+        } catch let error as ClickHouseError {
+            #expect(error.code == 241)
+            #expect(error.name == "MEMORY_LIMIT_EXCEEDED")
+        }
+    }
+
+    /// 22.x–25.x: the plain `Code: …` tail split in the middle.
+    @Test func plainExceptionTailSplitAcrossChunks() async throws {
+        let message = "Code: 241. DB::Exception: Memory limit (total) exceeded. (MEMORY_LIMIT_EXCEEDED) (version 24.8.14.39 (official build))\n"
+        var response = FakeClickHouseServer.Response.tsv("", headers: ["Content-Type": "text/tab-separated-values; charset=UTF-8"])
+        let split = message.index(message.startIndex, offsetBy: 30)
+        response.chunks = [Data(("n\nUInt64\n1\n2\n" + message[..<split]).utf8), Data(String(message[split...]).utf8)]
+        response.chunkDelay = .milliseconds(200)
+        let framed = response
+        let server = try await FakeClickHouseServer { request in FakeAnswers.standard(request) ?? framed }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        await #expect(throws: ClickHouseError.self) {
+            do { _ = try await client.run("SELECT 1") } catch let error as ClickHouseError {
+                #expect(error.code == 241)
+                throw error
+            }
+        }
+    }
+}

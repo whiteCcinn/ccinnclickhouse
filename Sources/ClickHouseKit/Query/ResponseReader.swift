@@ -79,9 +79,15 @@ enum ResponseReader {
                 response.acknowledge(chunk.count)
                 collectBinary()
                 if parser.isInTrailer {
-                    // The server reported an exception after these rows: it wins over any limit.
+                    // The server reported an exception after these rows: it wins over any limit. Its text
+                    // may continue in later chunks, so read on until it is complete or the stream ends
+                    // (the parser caps the trailer, so this reads at most 64 KB more).
                     rows += parsed
-                    break
+                    if parser.isTrailerComplete {
+                        response.cancel()
+                        break
+                    }
+                    continue
                 }
                 if rows.count + parsed.count > limits.maxRows {
                     // More rows than allowed exist: keep the first `maxRows` and stop reading.

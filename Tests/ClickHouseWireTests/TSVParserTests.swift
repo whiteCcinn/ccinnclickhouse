@@ -271,3 +271,27 @@ struct TSVEdgeCaseTests {
         }
     }
 }
+
+@Suite("TSV parser trailer completeness")
+struct TSVTrailerCompletenessTests {
+    @Test func taggedTrailerIsCompleteOnlyAfterTheClosingFrame() throws {
+        let tag = "abcdefghijklmnop"
+        let message = "Code: 241. DB::Exception: x. (MEMORY_LIMIT_EXCEEDED) (version 26.8.1.1 (official build))\n"
+        var parser = TSVResultParser(exceptionTag: tag)
+        _ = try parser.consume(Data("n\nUInt64\n1\n\r\n__exception__\r\n".utf8))
+        #expect(parser.isInTrailer)
+        #expect(!parser.isTrailerComplete)
+        _ = try parser.consume(Data("\(tag)\r\n\(message)".utf8))
+        #expect(!parser.isTrailerComplete)
+        _ = try parser.consume(Data("\(message.utf8.count) \(tag)\r\n__exception__\r\n".utf8))
+        #expect(parser.isTrailerComplete)
+        #expect(throws: ClickHouseServerException.self) { _ = try parser.finish(abruptly: false) }
+    }
+
+    @Test func trailerAtTheCapIsComplete() throws {
+        var parser = TSVResultParser(exceptionTag: "abcdefghijklmnop")
+        _ = try parser.consume(Data("n\nUInt64\n1\n\r\n__exception__\r\n".utf8))
+        _ = try parser.consume(Data(repeating: 0x41, count: TSVResultParser.maxTrailerBytes + 10))
+        #expect(parser.isTrailerComplete)
+    }
+}
