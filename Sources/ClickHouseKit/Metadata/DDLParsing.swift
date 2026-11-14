@@ -87,6 +87,8 @@ public struct CreateStatementDetails: Sendable, Equatable {
     /// `TO db.table` of a materialized view.
     public var materializedViewTarget: String?
 
+    public init() {}
+
     public static func == (lhs: CreateStatementDetails, rhs: CreateStatementDetails) -> Bool {
         lhs.columnTTLs == rhs.columnTTLs && lhs.materializedViewTarget == rhs.materializedViewTarget
             && lhs.projections.map(\.name) == rhs.projections.map(\.name) && lhs.projections.map(\.definition) == rhs.projections.map(\.definition)
