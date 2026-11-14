@@ -73,7 +73,7 @@ public actor SQLSession {
                     // Safe to retry: the server rejected the statement before running it.
                     established = false
                     recreated = true
-                    await replaySettings()
+                    try await replaySettings(generation: generation)
                     continue
                 case ClickHouseError.Code.invalidSessionTimeout? where sessionTimeout != nil:
                     sessionTimeout = nil
@@ -81,7 +81,7 @@ public actor SQLSession {
                 case ClickHouseError.Code.sessionIsLocked? where lockedRetries < 10:
                     // A just-cancelled statement still holds the session on the server.
                     lockedRetries += 1
-                    try await Task.sleep(for: .milliseconds(300))
+                    do { try await Task.sleep(for: .milliseconds(300)) } catch { throw ClickHouseError.cancelled() }
                     continue
                 default:
                     break
@@ -105,11 +105,13 @@ public actor SQLSession {
         }
     }
 
-    /// Stops the running statement: aborts the request and kills its query id on the server.
+    /// Stops the running statement: aborts the request and kills its query id on the server. A cancel
+    /// that lands between attempts (a SESSION_IS_LOCKED wait, a settings replay) still stops the run:
+    /// the generation is marked whenever a run is in progress, and every retry checks it first.
     public func cancel() {
-        guard let task = runningTask else { return }
+        guard isBusy else { return }
         cancelledGeneration = runGeneration
-        task.cancel()
+        runningTask?.cancel()
     }
 
     public func close() {
@@ -125,12 +127,20 @@ public actor SQLSession {
         return error.message.lowercased().contains("session")
     }
 
-    private func replaySettings() async {
+    /// Restores the tracked `SET`s into a recreated session. Each replay request is cancellable through
+    /// `cancel()` like the statement itself; a cancelled run stops replaying and throws.
+    private func replaySettings(generation: UInt64) async throws {
         for statement in settingStatements {
+            if Task.isCancelled || cancelledGeneration == generation { throw ClickHouseError.cancelled() }
             let options = QueryOptions(purpose: "meta", database: database,
                                        session: SessionParameters(id: sessionID, check: false, timeout: sessionTimeout),
                                        limits: .metadata, timeout: ClickHouseClient.metadataTimeout, waitEndOfQuery: true)
-            if (try? await client.run(statement, options: options)) != nil { established = true }
+            let client = client
+            let task = Task { try await client.run(statement, options: options) }
+            runningTask = task
+            let replayed = (try? await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }) != nil
+            finishRun(generation)
+            if replayed { established = true }
         }
     }
 

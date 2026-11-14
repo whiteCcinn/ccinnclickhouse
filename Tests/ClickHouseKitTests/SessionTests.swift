@@ -204,3 +204,90 @@ struct SessionTests {
         if case let .settings(_, pairs)? = SessionContextChange.parse("SET x = 1 +") { #expect(pairs.isEmpty) }
     }
 }
+
+@Suite("Session cancellation between attempts", .serialized)
+struct SessionCancellationTests {
+    /// Answers SESSION_IS_LOCKED once to the statement, then would run it.
+    static func lockedOnce() -> (@Sendable (FakeClickHouseServer.Request) -> FakeClickHouseServer.Response) {
+        let answered = OSAllocatedUnfairLock(initialState: false)
+        return { request in
+            if let answer = FakeAnswers.standard(request) { return answer }
+            guard request.sql.contains("DELETE WHERE") else { return .empty() }
+            if answered.withLock({ value -> Bool in defer { value = true }; return !value }) {
+                return .exception(code: 373, name: "SESSION_IS_LOCKED", message: "Session is locked by a concurrent client")
+            }
+            return .empty()
+        }
+    }
+
+    @Test func cancelDuringLockedWaitStopsTheRetry() async throws {
+        let server = try await FakeClickHouseServer(handler: Self.lockedOnce())
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        let session = client.openSession()
+        let run = Task { try await session.run("ALTER TABLE t DELETE WHERE 1") }
+        #expect(await eventually { server.requests(containing: "DELETE WHERE").count == 1 })
+        try await Task.sleep(for: .milliseconds(80))
+        await session.cancel()
+        await #expect(throws: ClickHouseError.self) { _ = try await run.value }
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(server.requests(containing: "DELETE WHERE").count == 1, "the cancelled statement was not re-sent")
+    }
+
+    @Test func cancellingTheCallerDuringLockedWaitStopsTheRetry() async throws {
+        let server = try await FakeClickHouseServer(handler: Self.lockedOnce())
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        let session = client.openSession()
+        let run = Task { try await session.run("ALTER TABLE t DELETE WHERE 1") }
+        #expect(await eventually { server.requests(containing: "DELETE WHERE").count == 1 })
+        try await Task.sleep(for: .milliseconds(80))
+        run.cancel()
+        do {
+            _ = try await run.value
+            Issue.record("expected a cancellation")
+        } catch let error as ClickHouseError {
+            #expect(error.kind == .cancelled)
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(server.requests(containing: "DELETE WHERE").count == 1)
+        // The session is free again.
+        #expect(try await session.run("SELECT 1").rows.isEmpty)
+    }
+
+    @Test func cancelDuringSettingsReplayStopsTheRetry() async throws {
+        let expired = OSAllocatedUnfairLock(initialState: false)
+        let server = try await FakeClickHouseServer { request in
+            if let answer = FakeAnswers.standard(request) { return answer }
+            if request.sql.hasPrefix("SET ") {
+                // The replay (after the session expired) is slow, so a cancel lands during it.
+                if expired.withLock({ $0 }) {
+                    var response = FakeClickHouseServer.Response.empty()
+                    response.headDelay = .milliseconds(500)
+                    return response
+                }
+                return .empty()
+            }
+            if request.sql.contains("ALTER"), request.parameters["session_check"] == "1", !expired.withLock({ $0 }) {
+                expired.withLock { $0 = true }
+                return .exception(code: 372, name: "SESSION_NOT_FOUND", message: "Session not found", status: 404)
+            }
+            return .empty()
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        let session = client.openSession()
+        _ = try await session.run("SET max_threads = 2")
+        _ = try await session.run("SET max_memory_usage = 1000000000")
+        let run = Task { try await session.run("ALTER TABLE t DELETE WHERE 1") }
+        #expect(await eventually { server.requests(containing: "SET max_threads").count == 2 })
+        await session.cancel()
+        await #expect(throws: ClickHouseError.self) { _ = try await run.value }
+        try await Task.sleep(for: .milliseconds(700))
+        #expect(server.requests(containing: "ALTER TABLE t").count == 1, "the statement was not re-sent after a cancelled replay")
+        #expect(server.requests(containing: "SET max_memory_usage").count == 1, "the replay stopped")
+    }
+}
