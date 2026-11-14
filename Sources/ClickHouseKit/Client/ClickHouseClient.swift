@@ -235,13 +235,14 @@ public final class ClickHouseClient: Sendable {
         try await run(sql, options: .metadata(timeout: timeout))
     }
 
-    /// Runs an optional metadata statement: `nil` when the server rejects it (unknown table on an older
-    /// version, missing privilege). Timeouts, network errors and cancellation still propagate, so a slow
-    /// cluster never yields silently incomplete metadata.
+    /// Runs an optional metadata statement: `nil` when the feature is unavailable (unknown table on an
+    /// older version, missing privilege, no Keeper). Timeouts, memory limits, cancellations and network
+    /// errors propagate, including those the server reports as exceptions, so a slow cluster never
+    /// yields silently incomplete metadata.
     public func tolerant(_ sql: String, timeout: Double? = ClickHouseClient.metadataTimeout) async throws -> QueryResult? {
         do {
             return try await execute(sql, timeout: timeout)
-        } catch let error as ClickHouseError where error.kind == .server {
+        } catch let error as ClickHouseError where error.isFeatureUnavailable {
             return nil
         }
     }

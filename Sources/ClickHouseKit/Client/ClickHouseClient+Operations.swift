@@ -135,7 +135,10 @@ extension ClickHouseClient {
     public func keeperStatus() async throws -> KeeperStatus {
         if systemSchema.hasTable("zookeeper_connection") {
             let list = systemSchema.selectList("zookeeper_connection", ["host", "port", "session_uptime_elapsed_seconds", "is_expired", "keeper_api_version"])
-            if let record = try await tolerant("SELECT \(list) FROM system.zookeeper_connection LIMIT 1")?.first {
+            // Any server error here falls through to the classification below.
+            let connection = try? await tolerant("SELECT \(list) FROM system.zookeeper_connection LIMIT 1")
+            if Task.isCancelled { throw ClickHouseError.cancelled() }
+            if let record = connection?.first {
                 return KeeperStatus(state: .connected, host: record.text("host"), port: record.int("port"),
                                     sessionUptimeSeconds: record.int("session_uptime_elapsed_seconds"), isExpired: record.bool("is_expired"),
                                     apiVersion: record.int("keeper_api_version"))

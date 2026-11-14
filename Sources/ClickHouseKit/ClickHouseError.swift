@@ -68,6 +68,21 @@ public struct ClickHouseError: Error, LocalizedError, Sendable, Equatable, Custo
         public static let accessDenied = 497
     }
 
+    /// The statement names something this server or user does not have (an unknown table, column,
+    /// function, database or setting on an older version, a missing privilege, no Keeper). Optional
+    /// metadata treats these as "not available"; anything else (timeouts, memory, cancellation,
+    /// network, Keeper failures) is a real failure and must surface.
+    public var isFeatureUnavailable: Bool {
+        guard kind == .server, let code else { return false }
+        return Self.featureUnavailableCodes.contains(code)
+    }
+
+    /// THERE_IS_NO_COLUMN, NOT_FOUND_COLUMN_IN_BLOCK, NO_SUCH_COLUMN_IN_TABLE, BAD_ARGUMENTS,
+    /// ILLEGAL_TYPE_OF_ARGUMENT, UNKNOWN_FUNCTION, UNKNOWN_IDENTIFIER, NOT_IMPLEMENTED, UNKNOWN_TABLE,
+    /// SYNTAX_ERROR, UNKNOWN_DATABASE, UNKNOWN_SETTING, NO_ZOOKEEPER, DATABASE_ACCESS_DENIED,
+    /// SUPPORT_IS_DISABLED, ACCESS_DENIED.
+    static let featureUnavailableCodes: Set<Int> = [8, 10, 16, 36, 43, 46, 47, 48, 60, 62, 81, 115, 225, 291, 344, 497]
+
     /// The statement was stopped by `KILL QUERY` or a client disconnect.
     public var isQueryCancelled: Bool { kind == .server && code == Code.queryWasCancelled }
 

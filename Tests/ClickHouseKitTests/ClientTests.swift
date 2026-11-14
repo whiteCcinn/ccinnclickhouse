@@ -728,3 +728,30 @@ struct ReadonlyTwoUserTests {
         #expect(result.rows == [["1"]])
     }
 }
+
+@Suite("Optional metadata: unavailable vs failed", .serialized)
+struct TolerantMetadataTests {
+    @Test(arguments: [(60, "UNKNOWN_TABLE"), (47, "UNKNOWN_IDENTIFIER"), (46, "UNKNOWN_FUNCTION"), (16, "NO_SUCH_COLUMN_IN_TABLE"),
+                      (497, "ACCESS_DENIED"), (81, "UNKNOWN_DATABASE"), (225, "NO_ZOOKEEPER")])
+    func unavailableFeaturesYieldNil(code: Int, name: String) async throws {
+        let server = try await FakeClickHouseServer { request in
+            FakeAnswers.standard(request) ?? .exception(code: code, name: name, message: "not here")
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        #expect(try await client.tolerant("SELECT * FROM system.future_table") == nil)
+    }
+
+    @Test(arguments: [(159, "TIMEOUT_EXCEEDED"), (394, "QUERY_WAS_CANCELLED"), (241, "MEMORY_LIMIT_EXCEEDED"),
+                      (202, "TOO_MANY_SIMULTANEOUS_QUERIES"), (209, "SOCKET_TIMEOUT"), (210, "NETWORK_ERROR"), (999, "KEEPER_EXCEPTION")])
+    func realFailuresPropagate(code: Int, name: String) async throws {
+        let server = try await FakeClickHouseServer { request in
+            FakeAnswers.standard(request) ?? .exception(code: code, name: name, message: "failed")
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        await #expect(throws: ClickHouseError.self) { _ = try await client.tolerant("SELECT * FROM system.settings") }
+    }
+}

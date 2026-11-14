@@ -241,9 +241,11 @@ final class WorkspaceModel {
             let realDatabase = databases.first { $0.name.lowercased() == database }?.name ?? database
             let realTables = tables.map { lowered in objects(in: realDatabase)?.first { $0.name.lowercased() == lowered }?.name ?? lowered }
             let task = Task {
-                let loaded = try? await client.columnsByTable(database: realDatabase, tables: realTables)
+                // Only a successful lookup proves a table has no columns to offer; a timeout, network
+                // error or cancellation must not put existing tables into the negative cache.
+                guard let loaded = try? await client.columnsByTable(database: realDatabase, tables: realTables) else { return }
                 var found = Set<TableKey>()
-                for (table, list) in loaded ?? [:] {
+                for (table, list) in loaded {
                     let key = TableKey(database: realDatabase, table: table)
                     columnCache[key] = list
                     found.insert(key)
