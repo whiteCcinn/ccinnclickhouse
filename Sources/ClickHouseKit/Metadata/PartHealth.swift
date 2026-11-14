@@ -30,7 +30,7 @@ public enum PartHealth {
         let worst = partitions.max { $0.activeParts < $1.activeParts }
         if let worst {
             let level = level(activeParts: worst.activeParts, limits: limits)
-            let label = worst.isUnpartitioned ? "the table" : "partition \(worst.partition)"
+            let label = worst.isUnpartitioned ? "The table" : "Partition \(worst.partition)"
             switch level {
             case .failing:
                 warnings.append(Warning(level: .failing, message: "\(label) has \(worst.activeParts) active parts (≥ parts_to_throw_insert \(limits.partsToThrowInsert)): inserts fail with TOO_MANY_PARTS."))

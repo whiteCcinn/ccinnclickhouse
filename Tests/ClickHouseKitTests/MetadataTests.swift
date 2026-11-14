@@ -114,11 +114,11 @@ struct MetadataTests {
                           PartitionSummary(partition: "202402", partitionID: "202402", activeParts: 3, rows: 10, bytesOnDisk: 1_000)]
         let warnings = PartHealth.warnings(partitions: partitions, limits: limits)
         #expect(warnings.first?.level == .critical)
-        #expect(warnings.first?.message.contains("partition 202401") == true)
+        #expect(warnings.first?.message.contains("Partition 202401") == true)
         #expect(warnings.contains { $0.message.contains("small parts") })
         #expect(PartHealth.warnings(partitions: [], limits: limits).isEmpty)
         let unpartitioned = [PartitionSummary(partition: "tuple()", partitionID: "all", activeParts: 60)]
-        #expect(PartHealth.warnings(partitions: unpartitioned, limits: limits).first?.message.hasPrefix("the table has 60 active parts") == true)
+        #expect(PartHealth.warnings(partitions: unpartitioned, limits: limits).first?.message.hasPrefix("The table has 60 active parts") == true)
     }
 
     @Test func recordsSaturateAndParseArrays() {
