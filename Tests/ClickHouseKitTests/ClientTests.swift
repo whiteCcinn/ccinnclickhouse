@@ -357,9 +357,10 @@ struct ClientTests {
 @Suite("Binary values", .serialized)
 struct BinaryValueTests {
     @Test func rawBytesSurviveForExport() async throws {
-        var body = Data("b\nString\n".utf8)
-        body.append(contentsOf: [0xC3, 0x28, 0x0A])
-        body.append(Data("plain\n".utf8))
+        var bytes = Data("b\nString\n".utf8)
+        bytes.append(contentsOf: [0xC3, 0x28, 0x0A])
+        bytes.append(Data("plain\n".utf8))
+        let body = bytes
         let server = try await FakeClickHouseServer { request in
             if let answer = FakeAnswers.standard(request) { return answer }
             return FakeClickHouseServer.Response(status: 200, headers: ["X-ClickHouse-Format": "TabSeparatedWithNamesAndTypes"], chunks: [body])
