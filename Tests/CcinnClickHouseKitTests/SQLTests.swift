@@ -195,3 +195,64 @@ struct SplitMix64: RandomNumberGenerator {
         return z ^ (z >> 31)
     }
 }
+
+@Suite("Read-only guard: external access and settings")
+struct ExternalAccessGuardTests {
+    @Test(arguments: [
+        "SELECT * FROM url('http://169.254.169.254/latest/meta-data', 'RawBLOB')",
+        "SELECT * FROM URL('http://x', 'RawBLOB')",
+        "SELECT * FROM `url`('http://x', 'RawBLOB')",
+        "SELECT * FROM \"file\"('/etc/passwd', 'LineAsString')",
+        "SELECT file('/etc/passwd')",
+        "SELECT * FROM remote('10.0.0.5', system.one)",
+        "SELECT * FROM remoteSecure('10.0.0.5:9440', system.one)",
+        "SELECT * FROM s3('https://b.s3.amazonaws.com/x.csv')",
+        "SELECT * FROM s3Cluster('c', 'https://b/x.csv')",
+        "SELECT * FROM hdfs('hdfs://x/y', 'CSV')",
+        "SELECT * FROM mysql('h:3306', 'd', 't', 'u', 'p')",
+        "SELECT * FROM postgresql('h', 'd', 't', 'u', 'p')",
+        "SELECT * FROM jdbc('jdbc:x', 't')",
+        "SELECT * FROM odbc('DSN=x', 't')",
+        "SELECT * FROM executable('x.sh', 'CSV', 'a String')",
+        "SELECT * FROM input('a String')",
+        "SELECT * FROM urlCluster('c', 'http://x')",
+        "SELECT * FROM azureBlobStorage('x')",
+        "SELECT * FROM numbers(3) AS n, url('http://x', 'RawBLOB') AS u",
+        "SELECT * FROM numbers(3) JOIN url('http://x', 'RawBLOB') USING (number)",
+        "SELECT * FROM (SELECT * FROM url('http://x', 'RawBLOB'))",
+        "SELECT number IN (SELECT * FROM file('x')) FROM numbers(3)",
+        "SELECT * FROM someFutureExternalSource('http://x')",
+        "SELECT 1 SETTINGS readonly = 0",
+        "SELECT 1 SETTINGS max_execution_time = 0",
+        "SELECT * FROM numbers(1e12) SETTINGS max_result_rows = 0, max_memory_usage = 0",
+        "SELECT * FROM (SELECT 1 SETTINGS allow_ddl = 1)",
+        "EXPLAIN SELECT * FROM url('http://x', 'RawBLOB')",
+        "SYSTEM STOP MERGES",
+        "KILL QUERY WHERE 1",
+        "SELECT 1 INTO OUTFILE '/tmp/x'",
+    ])
+    func rejected(sql: String) {
+        #expect(ReadOnlySQLGuard.check(sql) != nil, "\(sql)")
+    }
+
+    @Test(arguments: [
+        "SELECT * FROM numbers(10)",
+        "SELECT * FROM numbers_mt(10) AS a, zeros(3) AS b",
+        "SELECT * FROM generateRandom('a UInt8') LIMIT 1",
+        "SELECT * FROM clusterAllReplicas('c', system.processes)",
+        "SELECT * FROM cluster('c', system.one)",
+        "SELECT * FROM merge('db', '^t')",
+        "SELECT * FROM view(SELECT 1)",
+        "SELECT * FROM values('a UInt8', 1, 2)",
+        "SELECT url, file FROM t",
+        "SELECT domain(url), lower(path) FROM shop.events",
+        "SELECT count() FROM shop.events WHERE url LIKE '%file(%'",
+        "SELECT toStartOfHour(ts) AS h, count() FROM t GROUP BY h ORDER BY h",
+        "EXPLAIN indexes = 1 SELECT 1",
+        "SELECT * FROM t1 JOIN t2 ON t1.a = t2.a",
+        "SELECT * FROM t AS x, (SELECT 1) AS y",
+    ])
+    func allowed(sql: String) {
+        #expect(ReadOnlySQLGuard.check(sql) == nil, "\(sql) → \(ReadOnlySQLGuard.check(sql) ?? "")")
+    }
+}
