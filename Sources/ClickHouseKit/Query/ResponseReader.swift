@@ -59,6 +59,12 @@ enum ResponseReader {
 
         var parser = TSVResultParser(exceptionTag: head.header("x-clickhouse-exception-tag"), maxLineBytes: limits.maxLineBytes)
         var rows: [[String?]] = []
+        var binaryCells: [QueryResult.CellAddress: Data] = [:]
+        func collectBinary() {
+            for cell in parser.takeBinaryCells() where cell.row < limits.maxRows {
+                binaryCells[QueryResult.CellAddress(row: cell.row, column: cell.column)] = cell.bytes
+            }
+        }
         var consumed = 0
         var stoppedEarly = false
         var sample: Data? = format == nil ? Data() : nil
@@ -71,6 +77,7 @@ enum ResponseReader {
                 }
                 let parsed = try parser.consume(chunk)
                 response.acknowledge(chunk.count)
+                collectBinary()
                 if rows.count + parsed.count > limits.maxRows {
                     // More rows than allowed exist: keep the first `maxRows` and stop reading.
                     rows += parsed.prefix(max(0, limits.maxRows - rows.count))
@@ -110,6 +117,7 @@ enum ResponseReader {
         } else {
             do {
                 let last = try parser.finish(abruptly: false)
+                collectBinary()
                 if rows.count + last.count > limits.maxRows {
                     rows += last.prefix(max(0, limits.maxRows - rows.count))
                     stoppedEarly = true
@@ -124,7 +132,7 @@ enum ResponseReader {
             }
         }
         let result = QueryResult(columns: parser.columns ?? [], rows: rows, isTruncated: stoppedEarly, queryID: queryID, summary: summary,
-                                 serverDisplayName: displayName)
+                                 serverDisplayName: displayName, binaryCells: binaryCells)
         return Outcome(result: result, stoppedEarly: stoppedEarly)
     }
 

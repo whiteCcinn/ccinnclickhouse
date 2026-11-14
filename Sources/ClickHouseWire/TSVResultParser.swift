@@ -52,6 +52,8 @@ public struct TSVResultParser: Sendable {
     private var composite: [Bool] = []
     private var pending: [UInt8] = []
     private var heldLine: [UInt8]?
+    private var binaryCells: [BinaryCell] = []
+    private var emittedRows = 0
     private var trailer: [UInt8]?
     /// The trailer started with a line the server never terminated (stream cut short).
     private var trailerIsUnterminated = false
@@ -236,7 +238,7 @@ public struct TSVResultParser: Sendable {
     }
 
     /// Appends the decoded row; `false` when the field count does not match the header.
-    private func emitRowIfValid(_ line: UnsafeRawBufferPointer, into rows: inout [[String?]]) throws -> Bool {
+    private mutating func emitRowIfValid(_ line: UnsafeRawBufferPointer, into rows: inout [[String?]]) throws -> Bool {
         let fields = Self.splitFields(line)
         guard fields.count == composite.count else { return false }
         var row: [String?] = []
@@ -244,14 +246,38 @@ public struct TSVResultParser: Sendable {
         for (index, field) in fields.enumerated() {
             if field.count == 2, field[field.startIndex] == 0x5C, field[field.startIndex + 1] == 0x4E { // \N
                 row.append(nil)
-            } else if composite[index] {
-                row.append(String(decoding: field, as: UTF8.self))
+                continue
+            }
+            let bytes: [UInt8] = composite[index] ? Array(field) : Self.unescapeBytes(field)
+            if Self.isValidUTF8(bytes) {
+                row.append(String(decoding: bytes, as: UTF8.self))
             } else {
-                row.append(Self.unescape(field))
+                // Arbitrary bytes (binary String/FixedString): lossy text for display, raw bytes kept for export.
+                row.append(String(decoding: bytes, as: UTF8.self))
+                if binaryCells.count < Self.maxBinaryCells {
+                    binaryCells.append(BinaryCell(row: emittedRows, column: index, bytes: Data(bytes)))
+                }
             }
         }
         rows.append(row)
+        emittedRows += 1
         return true
+    }
+
+    /// A cell whose bytes are not valid UTF-8.
+    public struct BinaryCell: Sendable, Equatable {
+        /// Index among all rows emitted by this parser.
+        public let row: Int
+        public let column: Int
+        public let bytes: Data
+    }
+
+    static let maxBinaryCells = 200_000
+
+    /// Raw bytes of non-UTF-8 cells emitted since the last call.
+    public mutating func takeBinaryCells() -> [BinaryCell] {
+        defer { binaryCells.removeAll() }
+        return binaryCells
     }
 
     // MARK: Fields
@@ -271,22 +297,31 @@ public struct TSVResultParser: Sendable {
         return fields
     }
 
-    /// Reverses ClickHouse's TSV escaping. Unknown escapes yield the escaped character; a trailing
-    /// lone backslash is kept.
+    /// Reverses ClickHouse's TSV escaping (`\\t \\n \\r \\0 \\b \\f \\a \\v \\\\ \\'` and `\\xHH`). Unknown escapes
+    /// yield the escaped character; a trailing lone backslash is kept.
     static func unescape<Bytes: Collection>(_ field: Bytes) -> String where Bytes.Element == UInt8 {
-        guard field.contains(0x5C) else { return String(decoding: field, as: UTF8.self) }
+        String(decoding: unescapeBytes(field), as: UTF8.self)
+    }
+
+    static func unescapeBytes<Bytes: Collection>(_ field: Bytes) -> [UInt8] where Bytes.Element == UInt8 {
+        guard field.contains(0x5C) else { return Array(field) }
+        let input = Array(field)
         var output: [UInt8] = []
-        output.reserveCapacity(field.count)
-        var iterator = field.makeIterator()
-        while let byte = iterator.next() {
+        output.reserveCapacity(input.count)
+        var index = 0
+        while index < input.count {
+            let byte = input[index]
+            index += 1
             guard byte == 0x5C else {
                 output.append(byte)
                 continue
             }
-            guard let next = iterator.next() else {
+            guard index < input.count else {
                 output.append(0x5C)
                 break
             }
+            let next = input[index]
+            index += 1
             switch next {
             case UInt8(ascii: "t"): output.append(0x09)
             case UInt8(ascii: "n"): output.append(0x0A)
@@ -296,10 +331,40 @@ public struct TSVResultParser: Sendable {
             case UInt8(ascii: "f"): output.append(0x0C)
             case UInt8(ascii: "a"): output.append(0x07)
             case UInt8(ascii: "v"): output.append(0x0B)
+            case UInt8(ascii: "x"):
+                if index + 1 < input.count, let high = hexValue(input[index]), let low = hexValue(input[index + 1]) {
+                    output.append(high << 4 | low)
+                    index += 2
+                } else {
+                    output.append(next)
+                }
             default: output.append(next)
             }
         }
-        return String(decoding: output, as: UTF8.self)
+        return output
+    }
+
+    /// UTF-8 validation (macOS 14 has no `String(validating:)`), with an ASCII fast path.
+    static func isValidUTF8(_ bytes: [UInt8]) -> Bool {
+        if !bytes.contains(where: { $0 >= 0x80 }) { return true }
+        var iterator = bytes.makeIterator()
+        var decoder = UTF8()
+        while true {
+            switch decoder.decode(&iterator) {
+            case .scalarValue: continue
+            case .emptyInput: return true
+            case .error: return false
+            }
+        }
+    }
+
+    private static func hexValue(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case UInt8(ascii: "0")...UInt8(ascii: "9"): byte - UInt8(ascii: "0")
+        case UInt8(ascii: "a")...UInt8(ascii: "f"): byte - UInt8(ascii: "a") + 10
+        case UInt8(ascii: "A")...UInt8(ascii: "F"): byte - UInt8(ascii: "A") + 10
+        default: nil
+        }
     }
 
     // MARK: Exceptions

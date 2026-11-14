@@ -216,3 +216,58 @@ struct ExceptionTests {
         #expect(ClickHouseServerException.errorPosition(in: "no position") == nil)
     }
 }
+
+@Suite("TSV edge cases")
+struct TSVEdgeCaseTests {
+    @Test func nullVersusBackslashNInWrappedTypes() throws {
+        let text = "a\tb\tc\nNullable(String)\tLowCardinality(Nullable(String))\tString\n\\N\t\\N\t\\\\N\n\\\\N\t\\\\N\tN\n"
+        let (_, rows) = try TSVParserTests.parseAll(text)
+        #expect(rows[0][0] == nil)
+        #expect(rows[0][1] == nil)
+        #expect(rows[0][2] == "\\N")
+        #expect(rows[1][0] == "\\N")
+        #expect(rows[1][1] == "\\N")
+        #expect(rows[1][2] == "N")
+    }
+
+    @Test func everyEscapeAndHexBytes() throws {
+        // \x41 is 'A' (older servers), \x00 a NUL byte.
+        let text = "s\tf\nString\tFixedString(4)\na\\tb\\nc\\\\d\\0e\\bf\\fg\\rh\\'i\\x41j\tab\\0\\0\n"
+        let (_, rows) = try TSVParserTests.parseAll(text)
+        #expect(rows[0][0] == "a\tb\nc\\d\0e\u{08}f\u{0C}g\rh'iAj")
+        #expect(rows[0][1] == "ab\0\0")
+        #expect(TSVResultParser.unescape(Array("\\x".utf8)) == "x")
+        #expect(TSVResultParser.unescape(Array("\\xZZ".utf8)) == "xZZ")
+        #expect(TSVResultParser.unescape(Array("\\x4".utf8)) == "x4")
+    }
+
+    @Test func invalidUTF8KeepsRawBytesAndAlignment() throws {
+        var bytes = Array("bin\tn\nString\tUInt8\n".utf8)
+        bytes += [0x8B, 0xFF] + Array("\\t".utf8) + [0x09] + Array("7\nok\t8\n".utf8)
+        var parser = TSVResultParser()
+        let rows = try parser.consume(bytes) + parser.finish(abruptly: false)
+        #expect(rows.count == 2)
+        #expect(rows[0][1] == "7")
+        #expect(rows[0][0]?.contains("\u{FFFD}") == true)
+        let binary = parser.takeBinaryCells()
+        #expect(binary.count == 1)
+        #expect(binary.first?.row == 0)
+        #expect(binary.first?.column == 0)
+        #expect(binary.first?.bytes == Data([0x8B, 0xFF, 0x09]))
+        #expect(parser.takeBinaryCells().isEmpty)
+    }
+
+    @Test func fieldCountMismatchIsAnErrorNotACrash() {
+        #expect(throws: TSVParseError.self) { try TSVParserTests.parseAll("a\tb\nUInt8\tUInt8\n1\n") }
+        #expect(throws: TSVParseError.self) { try TSVParserTests.parseAll("a\tb\nUInt8\tUInt8\n1\t2\t3\n") }
+        #expect(throws: TSVParseError.self) { try TSVParserTests.parseAll("a\tb\nUInt8\n") }
+    }
+
+    @Test func hugeFieldIsBoundedAcrossChunks() {
+        var parser = TSVResultParser(maxLineBytes: 1024)
+        #expect(throws: TSVParseError.self) {
+            _ = try parser.consume(Array("s\nString\n".utf8))
+            for _ in 0..<100 { _ = try parser.consume(Array(repeating: UInt8(ascii: "x"), count: 100)) }
+        }
+    }
+}

@@ -143,11 +143,22 @@ public struct QueryResult: Sendable {
     public let rawText: String?
     /// The server session had expired and was recreated before this statement ran.
     public let sessionRecreated: Bool
+    /// Raw bytes of cells that are not valid UTF-8 (their `rows` text is a lossy rendering).
+    public let binaryCells: [CellAddress: Data]
     public let lookup: ColumnLookup
+
+    public struct CellAddress: Sendable, Hashable {
+        public let row: Int
+        public let column: Int
+        public init(row: Int, column: Int) {
+            self.row = row
+            self.column = column
+        }
+    }
 
     public init(columns: [ColumnDefinition], rows: [[String?]], isTruncated: Bool = false, queryID: String = "",
                 summary: QueryProgress? = nil, serverDisplayName: String? = nil, format: String? = nil, rawText: String? = nil,
-                sessionRecreated: Bool = false) {
+                sessionRecreated: Bool = false, binaryCells: [CellAddress: Data] = [:]) {
         self.columns = columns
         self.rows = rows
         self.isTruncated = isTruncated
@@ -157,12 +168,14 @@ public struct QueryResult: Sendable {
         self.format = format
         self.rawText = rawText
         self.sessionRecreated = sessionRecreated
+        self.binaryCells = binaryCells
         lookup = ColumnLookup(names: columns.map(\.name))
     }
 
     func with(sessionRecreated: Bool) -> QueryResult {
         QueryResult(columns: columns, rows: rows, isTruncated: isTruncated, queryID: queryID, summary: summary,
-                    serverDisplayName: serverDisplayName, format: format, rawText: rawText, sessionRecreated: sessionRecreated)
+                    serverDisplayName: serverDisplayName, format: format, rawText: rawText, sessionRecreated: sessionRecreated,
+                    binaryCells: binaryCells)
     }
 
     public var hasRowSet: Bool { !columns.isEmpty }
@@ -175,6 +188,13 @@ public struct QueryResult: Sendable {
 
     public var records: [Record] { rows.map { Record(values: $0, lookup: lookup) } }
     public var first: Record? { record(at: 0) }
+    /// Raw bytes of a cell for export: the original bytes for binary cells, UTF-8 otherwise.
+    public func bytes(row: Int, column: Int) -> Data? {
+        if let raw = binaryCells[CellAddress(row: row, column: column)] { return raw }
+        guard rows.indices.contains(row), rows[row].indices.contains(column), let text = rows[row][column] else { return nil }
+        return Data(text.utf8)
+    }
+
     /// First column of the first row (scalar queries).
     public var scalar: String? { rows.first?.first ?? nil }
 

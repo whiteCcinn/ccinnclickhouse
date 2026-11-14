@@ -353,3 +353,24 @@ struct ClientTests {
         await #expect(throws: ClickHouseError.self) { _ = try await client.tolerant("SELECT slow", timeout: 0.3) }
     }
 }
+
+@Suite("Binary values", .serialized)
+struct BinaryValueTests {
+    @Test func rawBytesSurviveForExport() async throws {
+        var body = Data("b\nString\n".utf8)
+        body.append(contentsOf: [0xC3, 0x28, 0x0A])
+        body.append(Data("plain\n".utf8))
+        let server = try await FakeClickHouseServer { request in
+            if let answer = FakeAnswers.standard(request) { return answer }
+            return FakeClickHouseServer.Response(status: 200, headers: ["X-ClickHouse-Format": "TabSeparatedWithNamesAndTypes"], chunks: [body])
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        let result = try await client.run("SELECT unhex('C328')")
+        #expect(result.rows.count == 2)
+        #expect(result.bytes(row: 0, column: 0) == Data([0xC3, 0x28]))
+        #expect(result.bytes(row: 1, column: 0) == Data("plain".utf8))
+        #expect(result.binaryCells.count == 1)
+    }
+}
