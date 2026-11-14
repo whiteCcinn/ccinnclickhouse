@@ -435,3 +435,23 @@ struct StaleConnectionTests {
         #expect(server.requests(containing: "INSERT").count == 1)
     }
 }
+
+@Suite("Proxy-safe query matching", .serialized)
+struct ProxyMatchingTests {
+    @Test func killAndProgressMatchTheLogCommentMarker() async throws {
+        let server = try await FakeClickHouseServer { request in
+            if request.sql.contains("FROM system.columns WHERE database = 'system'") {
+                return .tsv("table\tname\nString\tString\nprocesses\tquery_id\nprocesses\tSettings\nprocesses\tread_rows\n")
+            }
+            return FakeAnswers.standard(request) ?? .empty()
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        _ = try await client.killQuery(queryID: "ccinnch-sql-1")
+        let kill = try #require(server.requests(containing: "KILL QUERY").first)
+        #expect(kill.sql == "KILL QUERY WHERE (query_id = 'ccinnch-sql-1' OR Settings['log_comment'] = 'CcinnClickHouse/ccinnch-sql-1') ASYNC")
+        _ = try await client.run("SELECT 1", options: QueryOptions(queryID: "ccinnch-sql-2"))
+        #expect(server.requests.last?.parameters["log_comment"] == "CcinnClickHouse/ccinnch-sql-2")
+    }
+}

@@ -2,7 +2,8 @@
 server:
   http:
     listen_addr: ":9090"
-    allowed_networks: ["0.0.0.0/0"]
+    # Docker port forwarding presents host requests from a private bridge address.
+    allowed_networks: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.1"]
 users:
   - name: "ccinn"
     password: "ccinn-pass"

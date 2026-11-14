@@ -223,7 +223,7 @@ public final class ClickHouseClient: Sendable {
     /// connections and finally sent `ON CLUSTER` when a cluster is known.
     @discardableResult
     public func killQuery(queryID: String, cluster: String? = nil, onAnotherNode: Bool = false, sync: Bool = false) async throws -> KillOutcome {
-        let sql = "KILL QUERY WHERE query_id = \(SQLText.literal(queryID)) \(sync ? "SYNC" : "ASYNC")"
+        let sql = "KILL QUERY WHERE \(processCondition(queryID: queryID)) \(sync ? "SYNC" : "ASYNC")"
         let remote = onAnotherNode || isLoadBalanced
         let attempts = remote ? 8 : 1
         let builder = builder
@@ -243,7 +243,7 @@ public final class ClickHouseClient: Sendable {
                 return KillOutcome.notFound
             }
             do {
-                let onCluster = "KILL QUERY ON CLUSTER \(SQLText.quoteIdentifier(cluster)) WHERE query_id = \(SQLText.literal(queryID)) ASYNC"
+                let onCluster = "KILL QUERY ON CLUSTER \(SQLText.quoteIdentifier(cluster)) WHERE \(self.processCondition(queryID: queryID)) ASYNC"
                 let outcome = try await Self.run(onCluster, builder: builder, transport: transport,
                                                  options: QueryOptions(purpose: "kill", limits: .metadata, timeout: 15, waitEndOfQuery: true,
                                                                        readOnly: false))
@@ -252,6 +252,16 @@ public final class ClickHouseClient: Sendable {
                 return KillOutcome.notFound
             }
         }
+    }
+
+    /// Matches a query in `system.processes` by id, or by the `log_comment` marker the app sends when a
+    /// proxy (chproxy) replaced the id.
+    func processCondition(queryID: String) -> String {
+        let byID = "query_id = \(SQLText.literal(queryID))"
+        guard !capabilities.settingsLocked, !capabilities.unsupportedSettings.contains("log_comment"),
+              systemSchema.has("processes", column: "Settings") else { return byID }
+        let marker = RequestBuilder.marker(application: configuration.applicationName, queryID: queryID)
+        return "(\(byID) OR Settings['log_comment'] = \(SQLText.literal(marker)))"
     }
 
     func killInBackground(queryID: String) {

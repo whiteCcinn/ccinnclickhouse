@@ -97,6 +97,9 @@ public struct RequestBuilder: Sendable {
         self.capabilities = capabilities
     }
 
+    /// `log_comment` value that identifies a query even when a proxy rewrote its id.
+    public static func marker(application: String, queryID: String) -> String { "\(application)/\(queryID)" }
+
     public static func makeQueryID(purpose: String) -> String {
         "ccinnch-\(purpose)-\(UUID().uuidString.lowercased())"
     }
@@ -122,7 +125,9 @@ public struct RequestBuilder: Sendable {
         settings.append(("cancel_http_readonly_queries_on_client_close", "1"))
         if configuration.compression { settings.append(("enable_http_compression", "1")) }
         settings.append(("format_tsv_null_representation", "\\N"))
-        settings.append(("log_comment", configuration.applicationName))
+        // Tags the query with its id: proxies such as chproxy replace `query_id`, and the kill and
+        // progress lookups fall back to this marker (design D5).
+        settings.append(("log_comment", Self.marker(application: configuration.applicationName, queryID: queryID)))
         let explicit = Set(options.settings.map(\.0))
         for setting in settings where !capabilities.unsupportedSettings.contains(setting.0) && !explicit.contains(setting.0) {
             parameters.append(setting)

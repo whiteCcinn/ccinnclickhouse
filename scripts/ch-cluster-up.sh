@@ -19,7 +19,7 @@ for n in 1 2; do
     -v "$here/docker/users.d/ccinn-users.xml:/etc/clickhouse-server/users.d/ccinn-users.xml:ro" \
     -v "$here/docker/cluster/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro" \
     -v "$here/docker/cluster/macros-node$n.xml:/etc/clickhouse-server/config.d/macros.xml:ro" \
-    "${extra[@]}" "$image" >/dev/null
+    ${extra[@]+"${extra[@]}"} "$image" >/dev/null
 done
 docker rm -f ccinnch-it-proxy >/dev/null 2>&1 || true
 docker run -d --name ccinnch-it-proxy --network "$network" --memory 128m -p 127.0.0.1:18110:9090 \

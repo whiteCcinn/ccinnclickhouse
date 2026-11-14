@@ -31,7 +31,7 @@ extension ClickHouseClient {
             SELECT \(column("elapsed")) AS elapsed, \(column("read_rows")) AS read_rows, \(column("read_bytes")) AS read_bytes, \
             \(column("total_rows_approx")) AS total_rows_approx, \(column("written_rows")) AS written_rows, \(column("written_bytes")) AS written_bytes, \
             \(column("memory_usage")) AS memory_usage, \(column("peak_memory_usage")) AS peak_memory_usage \
-            FROM \(source("processes", cluster: isLoadBalanced ? cluster : nil)) WHERE query_id = \(SQLText.literal(queryID)) LIMIT 1
+            FROM \(source("processes", cluster: isLoadBalanced ? cluster : nil)) WHERE \(processCondition(queryID: queryID)) LIMIT 1
             """
         let result = try await run(sql, options: QueryOptions(purpose: "poll", limits: RowLimits(maxRows: 1), timeout: 10, waitEndOfQuery: true, idempotent: true))
         guard let record = result.first else { return nil }
