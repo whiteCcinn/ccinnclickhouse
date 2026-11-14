@@ -16,6 +16,8 @@ public struct ClickHouseError: Error, LocalizedError, Sendable, Equatable, Custo
         case cancelled
         /// The editor's session is already running a statement.
         case busy
+        /// A read-only connection whose endpoint does not apply `readonly=1` (e.g. a proxy drops it).
+        case readOnlyNotEnforced
     }
 
     public let kind: Kind

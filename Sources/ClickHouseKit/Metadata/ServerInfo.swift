@@ -60,7 +60,8 @@ public struct ServerInfo: Sendable, Equatable {
     public let uptimeSeconds: Int64?
     /// The user's default database.
     public let defaultDatabase: String?
-    /// The user's own `readonly` level (0, 1 or 2) before the app adds anything.
+    /// The effective `readonly` level (0, 1 or 2) of requests as the server sees them: the user's profile
+    /// plus the `readonly=1` the app sends for read-only connections (if the path delivers it).
     public let readonlyLevel: Int?
 
     public init(versionString: String, timeZone: String? = nil, currentUser: String? = nil, hostName: String? = nil,

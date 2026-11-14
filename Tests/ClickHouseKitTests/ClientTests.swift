@@ -455,3 +455,53 @@ struct ProxyMatchingTests {
         #expect(server.requests.last?.parameters["log_comment"] == "CcinnClickHouse/ccinnch-sql-2")
     }
 }
+
+@Suite("Read-only must be enforced by the server", .serialized)
+struct ReadOnlyEnforcementTests {
+    static func probe(readonly: String) -> String {
+        "version\ttimezone\tuser\thost\tuptime\tdatabase\treadonly\nString\tString\tString\tString\tUInt32\tString\tString\n24.8.14.39\tUTC\tccinn\tnode-1\t1\tdefault\t\(readonly)\n"
+    }
+
+    @Test func proxyThatDropsReadonlyIsRefused() async throws {
+        // Like chproxy: the readonly parameter never reaches ClickHouse.
+        let server = try await FakeClickHouseServer { request in
+            if request.sql.contains("version() AS version") { return .tsv(Self.probe(readonly: "0")) }
+            return FakeAnswers.standard(request) ?? .empty()
+        }
+        defer { server.stop() }
+        do {
+            _ = try await ClickHouseClient.connect(configuration(port: server.port, readOnly: true))
+            Issue.record("a read-only connection must not open when readonly=1 is not applied")
+        } catch let error as ClickHouseError {
+            #expect(error.kind == .readOnlyNotEnforced)
+        }
+        #expect(server.requests.first?.parameters["readonly"] == "1")
+    }
+
+    @Test func serverThatAppliesReadonlyIsAccepted() async throws {
+        let server = try await FakeClickHouseServer { request in
+            if request.sql.contains("version() AS version") { return .tsv(Self.probe(readonly: request.parameters["readonly"] ?? "0")) }
+            return FakeAnswers.standard(request) ?? .empty()
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port, readOnly: true))
+        #expect(client.serverInfo.readonlyLevel == 1)
+        await client.close()
+        // Read-write connections do not care.
+        let writable = try await ClickHouseClient.connect(configuration(port: server.port))
+        #expect(writable.serverInfo.readonlyLevel == 0)
+        await writable.close()
+    }
+
+    @Test func unknownLevelFailsClosed() async throws {
+        let server = try await FakeClickHouseServer { request in
+            if request.sql.contains("getSetting") { return .exception(code: 46, name: "UNKNOWN_FUNCTION", message: "Unknown function getSetting") }
+            if request.sql.contains("version() AS version") {
+                return .tsv("version\ttimezone\tuser\thost\tdatabase\nString\tString\tString\tString\tString\n20.3.1\tUTC\tccinn\tnode-1\tdefault\n")
+            }
+            return FakeAnswers.standard(request) ?? .empty()
+        }
+        defer { server.stop() }
+        await #expect(throws: ClickHouseError.self) { _ = try await ClickHouseClient.connect(configuration(port: server.port, readOnly: true)) }
+    }
+}

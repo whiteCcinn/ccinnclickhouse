@@ -57,6 +57,9 @@ public final class ClickHouseClient: Sendable {
             }
             if let name = probe.displayName { nodes.insert(name) }
             let builder = RequestBuilder(configuration: effective, baseURL: baseURL, capabilities: capabilities)
+            if effective.readOnly {
+                try await Self.verifyReadOnly(probe: probe, builder: builder, transport: transport)
+            }
             let schemaResult = try await Self.run(SystemSchema.loadQuery, builder: builder, transport: transport,
                                                   options: .metadata(timeout: max(configuration.connectTimeout, 10)))
             if let name = schemaResult.result.serverDisplayName { nodes.insert(name) }
@@ -111,6 +114,24 @@ public final class ClickHouseClient: Sendable {
             }
         }
         throw ClickHouseError(.server, "The server rejected every probe query")
+    }
+
+    /// Read-only connections must be read-only *on the server*: some proxies (chproxy) drop `readonly=1`
+    /// from the URL. Checked on the real request path (same transport, proxy and parameters); fails
+    /// closed when the level cannot be confirmed.
+    static func verifyReadOnly(probe: ServerInfo, builder: RequestBuilder, transport: any ClickHouseTransport) async throws {
+        var level = probe.readonlyLevel
+        if level == nil {
+            let outcome = try? await run("SELECT getSetting('readonly') AS readonly", builder: builder, transport: transport,
+                                         options: QueryOptions(purpose: "meta", limits: .metadata, timeout: 15, waitEndOfQuery: true, idempotent: true))
+            level = outcome?.result.first?.int("readonly").map { Int(clamping: $0) }
+        }
+        guard let level, level >= 1 else {
+            throw ClickHouseError(.readOnlyNotEnforced, """
+                This endpoint does not apply readonly=1 (a proxy such as chproxy may drop it), so ClickHouse would not enforce \
+                read-only access. Use a server user whose settings profile is readonly, or connect to ClickHouse directly.
+                """)
+        }
     }
 
     /// `Unknown setting 'x'` / `Setting x is neither a builtin setting…`.
