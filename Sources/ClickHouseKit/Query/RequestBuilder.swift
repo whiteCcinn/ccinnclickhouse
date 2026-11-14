@@ -72,10 +72,14 @@ public struct ConnectionCapabilities: Sendable, Equatable {
     public var settingsLocked: Bool
     /// Settings this server does not know (dropped after `UNKNOWN_SETTING`).
     public var unsupportedSettings: Set<String>
+    /// The user's profile is already read-only at a level other than 1 (readonly=2): ClickHouse refuses
+    /// any change of `readonly` there, and the server enforces read-only access without the parameter.
+    public var serverEnforcesReadOnly: Bool
 
-    public init(settingsLocked: Bool = false, unsupportedSettings: Set<String> = []) {
+    public init(settingsLocked: Bool = false, unsupportedSettings: Set<String> = [], serverEnforcesReadOnly: Bool = false) {
         self.settingsLocked = settingsLocked
         self.unsupportedSettings = unsupportedSettings
+        self.serverEnforcesReadOnly = serverEnforcesReadOnly
     }
 }
 
@@ -114,7 +118,7 @@ public struct RequestBuilder: Sendable {
             if let timeout = session.timeout { parameters.append(("session_timeout", String(timeout))) }
         }
         if options.waitEndOfQuery { parameters.append(("wait_end_of_query", "1")) }
-        if options.readOnly ?? configuration.readOnly { parameters.append(("readonly", "1")) }
+        if options.readOnly ?? configuration.readOnly, !capabilities.serverEnforcesReadOnly { parameters.append(("readonly", "1")) }
         guard !capabilities.settingsLocked else { return parameters }
         var settings: [(String, String)] = []
         if let timeout = options.timeout, timeout.isFinite, timeout > 0 {

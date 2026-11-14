@@ -689,3 +689,42 @@ struct TransportEarlyCompletionTests {
         }
     }
 }
+
+@Suite("Users whose profile is readonly=2", .serialized)
+struct ReadonlyTwoUserTests {
+    /// ClickHouse at readonly=2: changing `readonly` (to any other value) is refused with 164, every
+    /// other setting may change, and writes are refused.
+    static func handler(_ request: FakeClickHouseServer.Request) -> FakeClickHouseServer.Response {
+        if let value = request.parameters["readonly"], value != "2" {
+            return .exception(code: 164, name: "READONLY", message: "Cannot modify 'readonly' setting in readonly mode")
+        }
+        if request.sql.contains("version() AS version") { return .tsv(ReadOnlyEnforcementTests.probe(readonly: "2")) }
+        if let answer = FakeAnswers.standard(request) { return answer }
+        return .tsv("x\nUInt8\n1\n")
+    }
+
+    @Test func readOnlyProfileConnectsAndKeepsOtherSettings() async throws {
+        let server = try await FakeClickHouseServer(handler: Self.handler)
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port, readOnly: true))
+        defer { Task { await client.close() } }
+        #expect(client.serverInfo.readonlyLevel == 2)
+        #expect(!client.capabilities.settingsLocked, "readonly=2 users may change other settings")
+        let result = try await client.run("SELECT 1", options: QueryOptions(timeout: 30))
+        #expect(result.rows == [["1"]])
+        let last = try #require(server.requests(containing: "SELECT 1").last)
+        #expect(last.parameters["readonly"] == nil)
+        #expect(last.parameters["max_execution_time"] == "30")
+        #expect(last.parameters["log_comment"] != nil)
+    }
+
+    @Test func perRequestReadOnlyWorksOnReadWriteProfiles() async throws {
+        // MCP run_query asks for readonly=1 on every request, also for read-write profiles.
+        let server = try await FakeClickHouseServer(handler: Self.handler)
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        let result = try await client.run("SELECT 1", options: QueryOptions(readOnly: true))
+        #expect(result.rows == [["1"]])
+    }
+}

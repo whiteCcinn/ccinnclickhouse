@@ -90,12 +90,19 @@ public final class ClickHouseClient: Sendable {
                 let outcome = try await run(sql, builder: builder, transport: transport,
                                             options: QueryOptions(purpose: "meta", limits: .metadata, timeout: nil, waitEndOfQuery: true, idempotent: true))
                 let record = outcome.result.first
+                // At readonly=2 a later per-request readonly=1 (MCP run_query) would be refused.
+                if let level = record?.int("readonly"), level >= 2 { capabilities.serverEnforcesReadOnly = true }
                 return ServerInfo(versionString: record?.text("version") ?? "unknown", timeZone: record?.text("timezone"),
                                   currentUser: record?.text("user"), hostName: record?.text("host"),
                                   displayName: outcome.result.serverDisplayName ?? record?.text("host"),
                                   uptimeSeconds: record?.int("uptime"), defaultDatabase: record?.text("database"),
                                   readonlyLevel: record?.int("readonly").map { Int(clamping: $0) })
             } catch let error as ClickHouseError where error.kind == .server {
+                if error.code == ClickHouseError.Code.readonly, !capabilities.serverEnforcesReadOnly, error.message.contains("Cannot modify 'readonly'") {
+                    // A readonly=2 profile: the server is read-only already and refuses the parameter.
+                    capabilities.serverEnforcesReadOnly = true
+                    continue
+                }
                 if error.code == ClickHouseError.Code.readonly, !capabilities.settingsLocked, error.message.contains("Cannot modify") {
                     capabilities.settingsLocked = true
                     continue
