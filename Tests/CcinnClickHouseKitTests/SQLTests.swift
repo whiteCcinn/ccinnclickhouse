@@ -115,7 +115,7 @@ struct StatementTests {
     }
 
     @Test func autoLimit() {
-        #expect(AutoLimit.apply(to: "SELECT * FROM t", limit: 100) == .init(sql: "SELECT * FROM t LIMIT 100", applied: true))
+        #expect(AutoLimit.apply(to: "SELECT * FROM t", limit: 100) == .init(sql: "SELECT * FROM t LIMIT 100", applied: true, insertion: 15..<25))
         #expect(AutoLimit.apply(to: "SELECT * FROM t -- note", limit: 100).sql == "SELECT * FROM t LIMIT 100 -- note")
         #expect(AutoLimit.apply(to: "SELECT * FROM t LIMIT 5", limit: 100).applied == false)
         #expect(AutoLimit.apply(to: "SELECT * FROM t LIMIT 5 OFFSET 10", limit: 100).applied == false)
@@ -315,5 +315,23 @@ struct ClauseLookalikeTests {
     ])
     func readOnlyGuardStillRefusesSettingsClauses(_ sql: String) {
         #expect(ReadOnlySQLGuard.check(sql) != nil, "\(sql)")
+    }
+}
+
+@Suite("Error positions after auto-LIMIT")
+struct AutoLimitOffsetMappingTests {
+    @Test func errorOffsetsMapBackToTheOriginalText() {
+        let original = "SELECT * FROM t WHERE x = 1 SETTINGS max_threads = 1"
+        let outcome = AutoLimit.apply(to: original, limit: 1000)
+        #expect(outcome.sql == "SELECT * FROM t WHERE x = 1 LIMIT 1000 SETTINGS max_threads = 1")
+        let executed = outcome.sql as NSString
+        // A position after the insertion (the SETTINGS keyword) maps back to the same token.
+        let settingsInExecuted = executed.range(of: "SETTINGS").location
+        let settingsInOriginal = (original as NSString).range(of: "SETTINGS").location
+        #expect(outcome.originalOffset(ofExecuted: settingsInExecuted) == settingsInOriginal)
+        // Before the insertion nothing moves; inside it maps to the insertion point.
+        #expect(outcome.originalOffset(ofExecuted: 7) == 7)
+        #expect(outcome.originalOffset(ofExecuted: executed.range(of: "1000").location) == settingsInOriginal)
+        #expect(AutoLimit.Outcome(sql: original, applied: false).originalOffset(ofExecuted: 12) == 12)
     }
 }

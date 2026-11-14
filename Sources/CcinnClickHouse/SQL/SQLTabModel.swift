@@ -270,11 +270,13 @@ final class SQLTabModel {
         let kind = SQLStatementKind.of(sql)
         var executed = sql
         var limitApplied: Int?
+        var limitOutcome = AutoLimit.Outcome(sql: sql, applied: false)
         if kind == .query, autoLimit > 0 {
             let outcome = AutoLimit.apply(to: sql, limit: autoLimit)
             if outcome.applied {
                 executed = outcome.sql
                 limitApplied = autoLimit
+                limitOutcome = outcome
             }
         }
         let outcome = StatementOutcome(index: index, sql: sql, executedSQL: executed, kind: kind)
@@ -301,9 +303,10 @@ final class SQLTabModel {
             outcome.errorMessage = describe(error)
             outcome.errorCode = (error as? ClickHouseError)?.code
             historyEntry.errorMessage = outcome.errorMessage
-            if let offset, let message = (error as? ClickHouseError)?.message, let inner = SQLErrorLocator.offset(in: executed, message: message),
-               inner <= (sql as NSString).length {
-                errorOffset = offset + inner
+            // The server's position refers to the executed text; map it past an inserted LIMIT.
+            if let offset, let message = (error as? ClickHouseError)?.message, let position = SQLErrorLocator.offset(in: executed, message: message) {
+                let inner = limitOutcome.originalOffset(ofExecuted: position)
+                if inner <= (sql as NSString).length { errorOffset = offset + inner }
             }
         }
         stopProgress()

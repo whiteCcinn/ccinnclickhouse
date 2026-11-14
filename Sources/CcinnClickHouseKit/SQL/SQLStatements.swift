@@ -227,6 +227,21 @@ public enum AutoLimit {
     public struct Outcome: Sendable, Equatable {
         public let sql: String
         public let applied: Bool
+        /// UTF-16 range of the inserted text (with its spacing) in `sql`.
+        public let insertion: Range<Int>?
+
+        public init(sql: String, applied: Bool, insertion: Range<Int>? = nil) {
+            self.sql = sql
+            self.applied = applied
+            self.insertion = insertion
+        }
+
+        /// Maps a UTF-16 offset in the executed text (e.g. a server error position) back to the text the
+        /// user wrote; an offset inside the inserted LIMIT maps to where it was inserted.
+        public func originalOffset(ofExecuted offset: Int) -> Int {
+            guard let insertion, offset >= insertion.lowerBound else { return offset }
+            return offset >= insertion.upperBound ? offset - insertion.count : insertion.lowerBound
+        }
     }
 
     /// Clause keywords that end a `LIMIT n [OFFSET m]` clause.
@@ -274,13 +289,15 @@ public enum AutoLimit {
             let head = String(decoding: units[0..<offset], as: UTF16.self)
             let tail = String(decoding: units[offset...], as: UTF16.self)
             let separator = head.last?.isWhitespace == true ? "" : " "
-            return Outcome(sql: head + separator + "LIMIT \(limit) " + tail, applied: true)
+            let inserted = separator + "LIMIT \(limit) "
+            return Outcome(sql: head + inserted + tail, applied: true, insertion: offset..<(offset + inserted.utf16.count))
         }
         guard let lastSignificant else { return Outcome(sql: sql, applied: false) }
         offset = statement.tokens[lastSignificant].range.upperBound
         let head = String(decoding: units[0..<offset], as: UTF16.self)
         let tail = String(decoding: units[offset...], as: UTF16.self)
-        return Outcome(sql: head + " LIMIT \(limit)" + tail, applied: true)
+        let inserted = " LIMIT \(limit)"
+        return Outcome(sql: head + inserted + tail, applied: true, insertion: offset..<(offset + inserted.utf16.count))
     }
 
     /// `LIMIT n [, m] [OFFSET k] BY expr` limits rows per group, not the result.
