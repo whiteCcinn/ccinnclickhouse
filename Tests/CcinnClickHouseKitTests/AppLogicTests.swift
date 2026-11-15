@@ -140,6 +140,21 @@ struct ChartTests {
         #expect(data.points.allSatisfy { $0.y.isFinite })
     }
 
+    @Test func aggregatesThatOverflowAreDropped() {
+        let columns = [ColumnDefinition(name: "k", typeName: "String"), ColumnDefinition(name: "y", typeName: "Float64")]
+        let rows: [[String?]] = [["a", "1.7e308"], ["a", "1.7e308"], ["b", "1"], ["b", "2"]]
+        for aggregation in [ChartAggregation.sum, .average, .max] {
+            let data = ChartDataBuilder.build(columns: columns, rows: rows, spec: ChartSpec(kind: .bar, xColumn: 0, yColumns: [1], aggregation: aggregation),
+                                              roles: [.categorical, .numeric], pointBudget: 100)
+            #expect(data.points.allSatisfy { $0.y.isFinite }, "\(aggregation)")
+            #expect(data.points.contains { $0.x == .category("b") })
+        }
+        // Average of large finite values is computed without overflowing.
+        let average = ChartDataBuilder.build(columns: columns, rows: rows, spec: ChartSpec(kind: .bar, xColumn: 0, yColumns: [1], aggregation: .average),
+                                             roles: [.categorical, .numeric], pointBudget: 100)
+        #expect(average.points.first { $0.x == .category("a") }?.y == 1.7e308)
+    }
+
     @Test func datesAreUTC() {
         #expect(TextValue.dateTime("2026-03-29 02:30:00") == Date(timeIntervalSince1970: 1_774_751_400))
         #expect(TextValue.dateTime("2026-03-29T02:30:00Z") == Date(timeIntervalSince1970: 1_774_751_400))

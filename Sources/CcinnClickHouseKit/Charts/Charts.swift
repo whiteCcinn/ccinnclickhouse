@@ -275,14 +275,18 @@ public enum ChartDataBuilder {
     static func aggregate(_ observations: [Observation], using aggregation: ChartAggregation) -> [Observation] {
         struct Key: Hashable { let x: ChartX; let series: String }
         var order: [Key] = []
-        var sums: [Key: (sum: Double, count: Int, min: Double, max: Double)] = [:]
+        // `mean` is updated as mean·(n−1)/n + y/n, which stays within the inputs' range; a sum of large
+        // finite values can overflow to ±inf, and such a point is dropped rather than drawn.
+        var sums: [Key: (sum: Double, mean: Double, count: Int, min: Double, max: Double)] = [:]
         for observation in observations {
             let key = Key(x: observation.x, series: observation.series)
             if let current = sums[key] {
-                sums[key] = (current.sum + observation.y, current.count + 1, Swift.min(current.min, observation.y), Swift.max(current.max, observation.y))
+                let count = current.count + 1
+                let mean = current.mean / Double(count) * Double(count - 1) + observation.y / Double(count)
+                sums[key] = (current.sum + observation.y, mean, count, Swift.min(current.min, observation.y), Swift.max(current.max, observation.y))
             } else {
                 order.append(key)
-                sums[key] = (observation.y, 1, observation.y, observation.y)
+                sums[key] = (observation.y, observation.y, 1, observation.y, observation.y)
             }
         }
         return order.compactMap { key in
@@ -290,11 +294,12 @@ public enum ChartDataBuilder {
             let y: Double
             switch aggregation {
             case .sum, .none: y = value.sum
-            case .average: y = value.sum / Double(value.count)
+            case .average: y = value.mean
             case .count: y = Double(value.count)
             case .min: y = value.min
             case .max: y = value.max
             }
+            guard y.isFinite else { return nil }
             return (key.x, y, key.series)
         }
     }
