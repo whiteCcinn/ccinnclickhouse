@@ -138,9 +138,17 @@ public struct SQLLexer: Sendable {
             case 0x60, 0x22: // ` or "
                 index = endOfQuoted(from: index, quote: unit)
                 tokens.append(SQLToken(kind: .quotedIdentifier, range: start..<index))
-            case 0x24 where heredocTagEnd(from: index) != nil: // $tag$
-                index = endOfHeredoc(from: index)
-                tokens.append(SQLToken(kind: .string, range: start..<index))
+            case 0x24: // `$tag$ … $tag$`, a lone `$`, or a bare word such as `$a$` / `$1` (as ClickHouse lexes them)
+                if let end = heredocEnd(from: index) {
+                    index = end
+                    tokens.append(SQLToken(kind: .string, range: start..<index))
+                } else if let next = peek(index + 1), Self.isWordChar(next) {
+                    while index < count, Self.isIdentifierPart(units[index]) || units[index] == 0x24 { index += 1 }
+                    tokens.append(SQLToken(kind: .identifier, range: start..<index))
+                } else {
+                    index += 1
+                    tokens.append(SQLToken(kind: .operator, range: start..<index))
+                }
             case 0x7B where parameterEnd(from: index) != nil: // {name:Type}
                 index = parameterEnd(from: index) ?? index + 1
                 tokens.append(SQLToken(kind: .parameter, range: start..<index))
@@ -155,7 +163,8 @@ public struct SQLLexer: Sendable {
                 tokens.append(SQLToken(kind: .punctuation, range: start..<index))
             default:
                 if Self.isIdentifierStart(unit) {
-                    while index < count, Self.isIdentifierPart(units[index]) { index += 1 }
+                    // ClickHouse bare words continue through `$` (`a$b`).
+                    while index < count, Self.isIdentifierPart(units[index]) || units[index] == 0x24 { index += 1 }
                     let word = String(decoding: units[start..<index], as: UTF16.self).uppercased()
                     let kind: SQLToken.Kind = SQLKeywords.all.contains(word) ? .keyword : .identifier
                     tokens.append(SQLToken(kind: kind, range: start..<index))
@@ -174,9 +183,10 @@ public struct SQLLexer: Sendable {
 
     private func peek(_ index: Int) -> UInt16? { index >= 0 && index < units.count ? units[index] : nil }
 
+    /// ClickHouse starts a `#` comment only at `# ` or `#!`.
     private func isHashComment(at index: Int) -> Bool {
-        guard let next = peek(index + 1) else { return true }
-        return next == 0x21 || next == 0x20 || next == 0x09 || next == 0x0A || next == 0x0D
+        guard let next = peek(index + 1) else { return false }
+        return next == 0x21 || next == 0x20
     }
 
     /// `t.5` is member access (tuple element), `.5` alone is a number.
@@ -186,9 +196,10 @@ public struct SQLLexer: Sendable {
             || (last.kind == .punctuation && (units[last.range.lowerBound] == 0x29 || units[last.range.lowerBound] == 0x5D))
     }
 
+    /// Line comments run to `\n` (ClickHouse does not end them at a lone `\r`).
     private func endOfLine(from index: Int) -> Int {
         var index = index
-        while index < units.count, units[index] != 0x0A, units[index] != 0x0D { index += 1 }
+        while index < units.count, units[index] != 0x0A { index += 1 }
         return index
     }
 
@@ -231,25 +242,27 @@ public struct SQLLexer: Sendable {
         return units.count
     }
 
-    /// End (exclusive) of the opening `$tag$` when `index` starts one.
-    private func heredocTagEnd(from index: Int) -> Int? {
-        var position = index + 1
-        while position < units.count, Self.isIdentifierPart(units[position]), units[position] < 0x80 { position += 1 }
-        guard position < units.count, units[position] == 0x24 else { return nil }
-        // `$1` style positional placeholders are not heredocs: the tag must not start with a digit.
-        if position > index + 1, Self.isDigit(units[index + 1]) { return nil }
-        return position + 1
-    }
-
-    private func endOfHeredoc(from index: Int) -> Int {
-        guard let bodyStart = heredocTagEnd(from: index) else { return index + 1 }
-        let tag = Array(units[index..<bodyStart])
-        var position = bodyStart
-        while position + tag.count <= units.count {
-            if units[position] == 0x24, Array(units[position..<(position + tag.count)]) == tag { return position + tag.count }
+    /// End (exclusive) of a heredoc starting at `index` (`$`): the tag is everything up to the next `$`
+    /// (ClickHouse accepts any text there) and the heredoc ends after the next occurrence of the tag.
+    /// `nil` when there is no closing tag.
+    private func heredocEnd(from index: Int) -> Int? {
+        var tagEnd = index + 1
+        while tagEnd < units.count, units[tagEnd] != 0x24 { tagEnd += 1 }
+        guard tagEnd < units.count else { return nil }
+        let tagLength = tagEnd + 1 - index
+        var position = tagEnd + 1
+        while position + tagLength <= units.count {
+            if units[position] == 0x24 {
+                var matches = true
+                for offset in 1..<tagLength where units[position + offset] != units[index + offset] {
+                    matches = false
+                    break
+                }
+                if matches { return position + tagLength }
+            }
             position += 1
         }
-        return units.count
+        return nil
     }
 
     /// End (exclusive) of `{name:Type}` starting at `index`.
@@ -312,6 +325,11 @@ public struct SQLLexer: Sendable {
 
     static func isIdentifierPart(_ unit: UInt16) -> Bool {
         isIdentifierStart(unit) || isDigit(unit)
+    }
+
+    /// ClickHouse's `isWordCharASCII`.
+    static func isWordChar(_ unit: UInt16) -> Bool {
+        (unit >= 0x41 && unit <= 0x5A) || (unit >= 0x61 && unit <= 0x7A) || unit == 0x5F || isDigit(unit)
     }
 
     static func continuesOperator(previous: UInt16, next: UInt16) -> Bool {

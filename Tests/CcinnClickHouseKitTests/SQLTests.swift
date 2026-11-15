@@ -379,3 +379,42 @@ struct RedactionGapTests {
         #expect(SQLRedactor.redactMessage("Table default.t doesn't exist. (UNKNOWN_TABLE)") == "Table default.t doesn't exist. (UNKNOWN_TABLE)")
     }
 }
+
+/// The lexer must split and classify like ClickHouse's own lexer (src/Parsers/Lexer.cpp), or the app
+/// and the server see different statements.
+@Suite("Lexer agrees with ClickHouse on heredocs and comments")
+struct LexerParityTests {
+    func kinds(_ sql: String) -> [(SQLToken.Kind, String)] {
+        let lexer = SQLLexer(sql)
+        return lexer.tokens().map { ($0.kind, lexer.text(of: $0)) }
+    }
+
+    @Test func unterminatedHeredocIsABareWord() {
+        // ClickHouse: no closing `$a$`, so `$a$` is a bare word and `;` ends the statement.
+        let statements = SQLStatementSplitter.split("SELECT 1 AS $a$; DROP TABLE t")
+        #expect(statements.count == 2)
+        #expect(ReadOnlySQLGuard.check("SELECT 1 AS $a$; DROP TABLE t") != nil)
+        #expect(SQLStatementKind.of("SELECT 1 AS $a$; DROP TABLE t") == .query, "the first statement")
+        #expect(kinds("SELECT 1 AS $a$").contains { $0 == (.identifier, "$a$") })
+        #expect(SQLStatementSplitter.split("SELECT $$ open; SELECT 2").count == 2)
+    }
+
+    @Test func heredocTagsMatchClickHouse() {
+        // Any text up to the next `$` is the tag; `$1$ … $1$` is a heredoc too.
+        #expect(kinds("SELECT $1$ x; y $1$").contains { $0 == (.string, "$1$ x; y $1$") })
+        #expect(kinds("SELECT $a b$ x $a b$").contains { $0 == (.string, "$a b$ x $a b$") })
+        // A lone `$` before a non-word character is the dollar sign.
+        #expect(kinds("SELECT $ 1").contains { $0 == (.operator, "$") })
+        #expect(kinds("SELECT $1").contains { $0 == (.identifier, "$1") })
+    }
+
+    @Test func commentsEndLikeClickHouse() {
+        // `--` comments run to `\n` only: a lone `\r` does not end them.
+        #expect(SQLStatementSplitter.split("SELECT 1 -- note\r; DROP TABLE t").count == 1)
+        #expect(SQLStatementSplitter.split("SELECT 1 -- note\n; DROP TABLE t").count == 2)
+        // `#` starts a comment only before a space or `!`.
+        #expect(!kinds("SELECT 1 #\tx").contains { $0.0 == .comment })
+        #expect(!kinds("SELECT 1 #").contains { $0.0 == .comment })
+        #expect(kinds("SELECT 1 # x").contains { $0 == (.comment, "# x") })
+    }
+}

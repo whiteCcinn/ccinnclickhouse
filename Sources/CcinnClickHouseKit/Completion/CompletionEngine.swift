@@ -90,6 +90,12 @@ public enum CompletionEngine {
            enclosing.kind == .string || enclosing.kind == .comment || enclosing.kind == .parameter {
             return .empty(at: cursor)
         }
+        // A `$tag$` opener before the cursor with no closing tag yet: the user is typing a heredoc string
+        // (the lexer, like ClickHouse, treats an unterminated opener as a bare word).
+        for token in tokens where token.range.upperBound <= cursor && (token.kind == .operator || token.kind == .identifier)
+            && lexer.units[token.range.lowerBound] == 0x24 {
+            if lexer.units[(token.range.lowerBound + 1)..<cursor].contains(0x24) { return .empty(at: cursor) }
+        }
         if let ending = tokens.last(where: { $0.range.upperBound == cursor }) {
             if ending.kind == .comment, lexer.text(of: ending).hasPrefix("--") || lexer.text(of: ending).hasPrefix("#") { return .empty(at: cursor) }
             if ending.kind == .string, !isTerminated(ending, lexer: lexer) { return .empty(at: cursor) }
