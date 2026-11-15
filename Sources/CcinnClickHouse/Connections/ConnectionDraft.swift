@@ -121,13 +121,17 @@ final class ConnectionDraft {
                 let info = client.serverInfo
                 let databases = (try? await client.databases().count) ?? 0
                 let locked = client.capabilities.settingsLocked
+                let enforcedByUserProfile = locked || client.capabilities.serverEnforcesReadOnly
                 await client.close()
                 guard !Task.isCancelled, testGeneration == generation else { return }
                 var message = "Connected to \(info.version.map { "ClickHouse \($0.raw)" } ?? info.versionString)"
                 message += " · \(databases) databases"
                 if let user = info.currentUser { message += " · \(user)" }
                 if let zone = info.timeZone { message += " · \(zone)" }
-                if locked { message += " · read-only user (settings are fixed by the server)" }
+                if let note = ReadOnlyAdvice.connectionNote(profileIsReadOnly: profile.readOnly, enforcedByUserProfile: enforcedByUserProfile) {
+                    message += " · \(note)"
+                }
+                if locked { message += " · settings are fixed by the server" }
                 testState = .succeeded(message)
             } catch {
                 guard !Task.isCancelled, testGeneration == generation else { return }

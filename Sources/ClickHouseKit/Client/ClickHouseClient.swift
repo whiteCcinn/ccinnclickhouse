@@ -137,7 +137,8 @@ public final class ClickHouseClient: Sendable {
         guard let level, level >= 1 else {
             throw ClickHouseError(.readOnlyNotEnforced, """
                 This endpoint does not apply readonly=1 (a proxy such as chproxy may drop it), so ClickHouse would not enforce \
-                read-only access. Use a server user whose settings profile is readonly, or connect to ClickHouse directly.
+                read-only access. Connect as a dedicated ClickHouse user whose settings profile is read-only and who has SELECT \
+                grants only (recommended, also for AI access), or connect to ClickHouse directly.
                 """)
         }
     }

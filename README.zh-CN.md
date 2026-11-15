@@ -167,6 +167,16 @@ CcinnClickHouse 内置 **Model Context Protocol** 服务。**Claude Code**、**C
 - `run_query` 只接受单条只读语句（`SELECT`、`WITH`、`SHOW`、`DESCRIBE`、`EXISTS`、`EXPLAIN`）。应用用自己的 SQL 词法分析器做检查，并拒绝访问 ClickHouse 外部的函数（`url`、`file`、`s3`、`remote`、`mysql`、`executable` 等）、白名单以外的表函数以及查询级 `SETTINGS`。
 - **ClickHouse 也会强制执行**：只读连接的每个请求都带有 `readonly=1`，并且连接在使用前会在真实请求路径上检查 `getSetting('readonly')`。**chproxy 等代理会丢弃 `readonly`**；经由这类代理的只读访问会被拒绝，除非代理背后的 ClickHouse 用户本身使用只读设置配置（把代理用户映射到这样的用户）。
 - 在设置中修改连接的 AI 访问权限，会立即作用于正在运行的 MCP 服务。
+- 每次工具调用都是独立的无状态请求：某次调用中的 `SET`、`USE` 或临时表不会带入下一次调用。
+
+**推荐做法：为 AI 使用专用的只读 ClickHouse 用户。** 若要真正隔离，请为 AI 访问创建独立的 ClickHouse 用户，其*设置配置（settings profile）*为只读，且只授予 `SELECT` 权限——不要授予 `SOURCES`、`URL`、`FILE`、`REMOTE`、`S3` 等权限。这样 ClickHouse 会自行强制只读（经由 chproxy 也同样有效），并拒绝访问服务器外部的表函数，不依赖应用本身。设置 → MCP 中提供同样的 SQL 并可一键复制；测试连接时会提示"由该用户的服务器配置强制只读"：
+
+```sql
+CREATE SETTINGS PROFILE IF NOT EXISTS ai_readonly SETTINGS readonly = 1;
+CREATE USER IF NOT EXISTS ai_reader IDENTIFIED WITH sha256_password BY 'choose-a-password' SETTINGS PROFILE 'ai_readonly';
+GRANT SELECT ON analytics.* TO ai_reader;
+-- Grant nothing else: without SOURCES grants, url(), file(), s3(), remote() … stay denied.
+```
 - 结果最多 1,000 行（默认 200 行）、约 256 KB。语句默认 30 秒超时（最长 120 秒）。
 - 在 AI 客户端中取消请求会停止 ClickHouse 上的查询。
 - `--read-only` 把所有连接限制为只读；`--profile <name>` 指定默认连接。

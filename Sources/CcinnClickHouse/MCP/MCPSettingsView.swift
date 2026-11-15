@@ -41,9 +41,31 @@ struct MCPSettingsView: View {
                         }
                     }
                 }
-                Text("Read-only allows the metadata tools and SELECT / SHOW / DESCRIBE / EXISTS / EXPLAIN, enforced by ClickHouse with readonly=1, at most 1,000 rows per call. Read & write adds a tool that runs any statement. Every call is logged to mcp-audit.jsonl in the app's data folder.")
+                Text("Read-only allows the metadata tools and SELECT / SHOW / DESCRIBE / EXISTS / EXPLAIN, enforced by ClickHouse with readonly=1 (checked when connecting; refused through proxies that drop it) and by the app, at most 1,000 rows per call. Read & write adds a tool that runs any statement. Every call is logged to mcp-audit.jsonl in the app's data folder.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            Section("Recommended: a dedicated read-only ClickHouse user") {
+                Text(ReadOnlyAdvice.summary)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Run as an administrator").font(.callout.weight(.semibold))
+                        Spacer()
+                        Button(copied == "setup-sql" ? "Copied" : "Copy") {
+                            Pasteboard.copy(ReadOnlyAdvice.setupSQL)
+                            copied = "setup-sql"
+                        }
+                        .controlSize(.small)
+                    }
+                    Text(ReadOnlyAdvice.setupSQL)
+                        .font(Theme.monospacedSmall)
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                }
             }
             Section("Add the server to your AI client") {
                 ForEach(snippets, id: \.title) { snippet in

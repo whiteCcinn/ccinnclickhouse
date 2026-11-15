@@ -140,6 +140,63 @@ extension LiveSuites {
     }
 }
 
+extension LiveSuites {
+    /// The setup the app recommends (ReadOnlyAdvice.setupSQL): a dedicated user whose settings profile is
+    /// read-only and who has SELECT grants only. The server enforces read-only access by itself and denies
+    /// external access through missing grants, independent of the app's parameter and guard.
+    @Suite("Recommended dedicated read-only user", .serialized)
+    struct RecommendedReadOnlyUserTests {
+        static let user = "ccinnch_ai_reader"
+        static let password = "ai-reader-pass"
+
+        @Test func dedicatedReadOnlyUserWorksForAIAccessAndIsDeniedExternalAccess() async throws {
+            let admin = try await ITEnvironment.connect()
+            defer { Task { await admin.close() } }
+            for statement in [
+                "CREATE SETTINGS PROFILE OR REPLACE ccinnch_ai_readonly SETTINGS readonly = 1",
+                "CREATE USER OR REPLACE \(Self.user) IDENTIFIED WITH sha256_password BY '\(Self.password)' SETTINGS PROFILE 'ccinnch_ai_readonly'",
+                "GRANT SELECT ON shop.* TO \(Self.user)",
+            ] { _ = try await admin.run(statement) }
+            defer {
+                Task {
+                    _ = try? await admin.run("DROP USER IF EXISTS \(Self.user)")
+                    _ = try? await admin.run("DROP SETTINGS PROFILE IF EXISTS ccinnch_ai_readonly")
+                }
+            }
+            let listener = try await RequestListener(port: 18196)
+            defer { listener.stop() }
+
+            // Read-only profile: enforced by the user's own profile (no reliance on the URL parameter).
+            let reader = try await ClickHouseClient.connect(ITEnvironment.configuration(user: Self.user, password: Self.password, readOnly: true))
+            defer { Task { await reader.close() } }
+            #expect(reader.serverInfo.readonlyLevel == 1)
+            #expect(reader.capabilities.settingsLocked)
+            #expect(try await reader.run("SELECT count() FROM shop.events").rows.first?.first != nil)
+            for sql in ["SELECT * FROM url('\(listener.url("ai"))', 'RawBLOB')", "SELECT * FROM file('/etc/passwd', 'LineAsString')",
+                        "CREATE TABLE shop.ai_should_not_exist (a UInt8) ENGINE = Memory"] {
+                await #expect(throws: ClickHouseError.self, "\(sql)") { _ = try await reader.run(sql, options: QueryOptions(timeout: 15)) }
+            }
+
+            // MCP read-only access as this user: metadata and queries work; external access is refused.
+            let target = try #require(ITEnvironment.url)
+            let profile = ConnectionProfile(name: "AI", host: target.host ?? "127.0.0.1", port: target.port ?? 8123, username: Self.user,
+                                            mcpAccess: .readOnly)
+            let tools = ClickHouseMCPTools(resolver: MCPProfileResolver(profiles: [profile], defaultProfile: nil, forceReadOnly: false),
+                                           registry: MCPClientRegistry { profile, access in
+                                               try await ClientOpener.open(profile: profile, password: Self.password, sshSecret: nil,
+                                                                           readOnlyOverride: access != .readWrite)
+                                           }, audit: nil)
+            let tables = await tools.call(name: "list_tables", arguments: ["database": "shop"])
+            #expect(!tables.isError, "\(tables.payload)")
+            let query = await tools.call(name: "run_query", arguments: ["sql": "SELECT count() AS n FROM shop.events"])
+            #expect(!query.isError, "\(query.payload)")
+            #expect(await tools.call(name: "run_query", arguments: ["sql": .string("SELECT * FROM url('\(listener.url("ai-mcp"))', 'RawBLOB')")]).isError)
+            try await Task.sleep(for: .seconds(1))
+            #expect(listener.requests.isEmpty, "\(listener.requests)")
+        }
+    }
+}
+
 extension ClusterIntegrationTests {
     /// chproxy drops `readonly` from the URL (verified on chproxy 1.30): read-only access through it is
     /// refused unless the ClickHouse user behind it is read-only itself.

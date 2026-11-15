@@ -167,6 +167,16 @@ CcinnClickHouse has a built-in **Model Context Protocol** server. AI assistants 
 - `run_query` accepts a single read-only statement (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXISTS`, `EXPLAIN`). The app checks this with its own SQL lexer and also refuses functions that reach outside ClickHouse (`url`, `file`, `s3`, `remote`, `mysql`, `executable`, …), table functions outside a small allow-list and per-query `SETTINGS`.
 - **ClickHouse enforces it too**: every request of a read-only connection carries `readonly=1`, and the connection checks `getSetting('readonly')` on the actual request path before it is used. Proxies such as **chproxy drop `readonly`**; read-only access through them is refused unless the ClickHouse user behind the proxy has a read-only settings profile (map the proxy user to such a user).
 - Changing a connection's AI access in Settings applies to a running MCP server immediately.
+- Each tool call is a separate stateless request: a `SET`, `USE` or temporary table never carries into the next call.
+
+**Recommended setup: a dedicated read-only ClickHouse user.** For real isolation, give AI access its own ClickHouse user whose *settings profile* is read-only and who has `SELECT` grants only — no `SOURCES`, `URL`, `FILE`, `REMOTE`, `S3` … grants. ClickHouse then enforces read-only access by itself (also behind chproxy) and refuses table functions that reach outside the server, independent of the app. Settings → MCP shows the same snippet with a Copy button, and a connection test confirms "read-only enforced by this user's server profile":
+
+```sql
+CREATE SETTINGS PROFILE IF NOT EXISTS ai_readonly SETTINGS readonly = 1;
+CREATE USER IF NOT EXISTS ai_reader IDENTIFIED WITH sha256_password BY 'choose-a-password' SETTINGS PROFILE 'ai_readonly';
+GRANT SELECT ON analytics.* TO ai_reader;
+-- Grant nothing else: without SOURCES grants, url(), file(), s3(), remote() … stay denied.
+```
 - Results are capped at 1,000 rows (200 by default) and about 256 KB. Statements time out after 30 s by default (at most 120 s).
 - Cancelling a request in the AI client stops the query on ClickHouse.
 - `--read-only` caps every connection at read-only; `--profile <name>` picks the default connection.

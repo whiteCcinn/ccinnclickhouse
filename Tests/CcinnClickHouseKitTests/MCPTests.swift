@@ -407,3 +407,23 @@ struct MCPByteCapTests {
         #expect(encoded["truncated"] == .bool(true))
     }
 }
+
+@Suite("Recommended read-only setup")
+struct ReadOnlyAdviceTests {
+    @Test func setupSQLIsThreeAdministrativeStatementsWithARedactablePassword() {
+        let statements = SQLStatementSplitter.split(ReadOnlyAdvice.setupSQL)
+        #expect(statements.count == 3)
+        #expect(statements.allSatisfy { SQLStatementKind.of($0.text).isMutation })
+        #expect(statements[0].text.contains("readonly = 1"))
+        #expect(statements[2].text.hasPrefix("GRANT SELECT"))
+        #expect(!SQLRedactor.redact(ReadOnlyAdvice.setupSQL).contains("choose-a-password"))
+        #expect(ReadOnlyAdvice.summary.contains("SELECT grants only"))
+    }
+
+    @Test func connectionNotes() {
+        #expect(ReadOnlyAdvice.connectionNote(profileIsReadOnly: true, enforcedByUserProfile: true)?.contains("recommended") == true)
+        #expect(ReadOnlyAdvice.connectionNote(profileIsReadOnly: false, enforcedByUserProfile: true) != nil)
+        #expect(ReadOnlyAdvice.connectionNote(profileIsReadOnly: true, enforcedByUserProfile: false)?.contains("readonly=1") == true)
+        #expect(ReadOnlyAdvice.connectionNote(profileIsReadOnly: false, enforcedByUserProfile: false) == nil)
+    }
+}
