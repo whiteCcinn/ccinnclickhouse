@@ -549,6 +549,8 @@ struct RetryReachedServerTests {
         #expect(attempts[0].queryID == "ccinnch-sql-first")
         #expect(attempts[1].queryID != "ccinnch-sql-first")
         #expect(result.queryID == attempts[1].queryID)
+        // The retry never goes back to the (possibly stale) pool.
+        #expect(attempts[1].headers["connection"]?.lowercased() == "close")
         #expect(await eventually { !server.requests(containing: "query_id = 'ccinnch-sql-first'").isEmpty })
     }
 

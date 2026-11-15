@@ -194,7 +194,9 @@ public final class ClickHouseClient: Sendable {
                 retry.queryID = retryID
                 attempts.withLock { $0.append(retryID) }
                 self.killInBackground(queryID: queryID)
-                return try await Self.run(sql, builder: builder, transport: transport, options: retry)
+                // A fresh connection: with keep_alive_timeout=3 (22.x) several pooled connections can be
+                // stale at once, and the pool could hand the retry another one.
+                return try await Self.run(sql, builder: builder, transport: transport, options: retry, freshConnection: true)
             }
         }
         func killAll() {
