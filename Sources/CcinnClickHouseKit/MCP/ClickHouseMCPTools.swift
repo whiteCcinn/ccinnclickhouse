@@ -466,7 +466,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         if let target = details.materializedViewTarget { result["materialized_view_target"] = .string(target) }
         if let query = table.asSelect { result["as_select"] = .string(String(query.prefix(20_000))) }
         if args.bool("include_ddl") ?? true, let ddl = table.createTableQuery {
-            result["ddl"] = .string(ddl.count > 20_000 ? String(ddl.prefix(20_000)) + "\n-- (truncated)" : ddl)
+            result["ddl"] = .string(ddl.utf8.count > 60_000 ? MCPResultEncoder.prefix(ddl, maxBytes: 60_000) + "\n-- (truncated)" : ddl)
         }
         return .object(result)
     }
@@ -687,7 +687,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         }
         let lines = result.rows.map { $0.compactMap { $0 }.joined(separator: "\t") }
         var plan = lines.joined(separator: "\n")
-        if plan.utf8.count > MCPResultEncoder.defaultMaxBytes { plan = String(plan.prefix(MCPResultEncoder.defaultMaxBytes)) + "\n… (truncated)" }
+        if plan.utf8.count > MCPResultEncoder.defaultMaxBytes { plan = MCPResultEncoder.prefix(plan, maxBytes: MCPResultEncoder.defaultMaxBytes) + "\n… (truncated)" }
         context.rows = lines.count
         return ["statement": .string(body), "plan": .string(plan)]
     }
@@ -712,10 +712,9 @@ public struct ClickHouseMCPTools: MCPToolProvider {
 
     static func encode(result: QueryResult, limit: Int) -> [String: JSONValue] {
         if let raw = result.rawText {
-            var text = raw
-            if text.utf8.count > MCPResultEncoder.defaultMaxBytes { text = String(text.prefix(MCPResultEncoder.defaultMaxBytes)) }
+            let text = MCPResultEncoder.prefix(raw, maxBytes: MCPResultEncoder.defaultMaxBytes)
             return ["format": JSONValue(result.format), "text": .string(text), "row_count": 0,
-                    "truncated": .bool(result.isTruncated || text.count < raw.count)]
+                    "truncated": .bool(result.isTruncated || text.utf8.count < raw.utf8.count)]
         }
         guard result.hasRowSet else {
             return ["row_count": 0, "message": "OK"]

@@ -66,6 +66,15 @@ public struct MCPProfileResolver: Sendable {
 public enum MCPResultEncoder {
     public static let defaultMaxBytes = 256 * 1024
 
+    /// The longest prefix of `text` that fits `maxBytes` of UTF-8, cut at a character boundary (a
+    /// character count would let CJK text grow to three times the cap).
+    public static func prefix(_ text: String, maxBytes: Int) -> String {
+        guard text.utf8.count > maxBytes else { return text }
+        var end = text.utf8.index(text.utf8.startIndex, offsetBy: max(0, maxBytes))
+        while end > text.startIndex, end.samePosition(in: text) == nil { end = text.utf8.index(before: end) }
+        return String(text[..<end])
+    }
+
     /// Rows as JSON arrays (integers that fit Int64 and finite floats as numbers, Bool as booleans,
     /// everything else — big integers, decimals, dates, composites — as exact strings), cut to
     /// `maxBytes` of serialized output.

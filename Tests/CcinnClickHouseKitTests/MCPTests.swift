@@ -382,3 +382,28 @@ func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async 
     }
     return condition()
 }
+
+@Suite("MCP byte caps")
+struct MCPByteCapTests {
+    @Test func prefixCountsUTF8BytesAndKeepsCharactersWhole() {
+        let cjk = String(repeating: "数据库", count: 200_000) // 3 bytes per character
+        let cut = MCPResultEncoder.prefix(cjk, maxBytes: MCPResultEncoder.defaultMaxBytes)
+        #expect(cut.utf8.count <= MCPResultEncoder.defaultMaxBytes)
+        #expect(cut.utf8.count > MCPResultEncoder.defaultMaxBytes - 4)
+        #expect(cjk.hasPrefix(cut))
+        let emoji = String(repeating: "👩‍👩‍👧", count: 10) // multi-scalar grapheme clusters
+        let emojiCut = MCPResultEncoder.prefix(emoji, maxBytes: 30)
+        #expect(emojiCut.utf8.count <= 30)
+        #expect(emoji.hasPrefix(emojiCut))
+        #expect(MCPResultEncoder.prefix("short", maxBytes: 100) == "short")
+        #expect(MCPResultEncoder.prefix("abc", maxBytes: 0) == "")
+    }
+
+    @Test func rawTextResultsAreCappedInBytes() {
+        let raw = String(repeating: "列", count: 200_000)
+        let result = QueryResult(columns: [], rows: [], queryID: "q", format: "TSVRaw", rawText: raw)
+        let encoded = ClickHouseMCPTools.encode(result: result, limit: 10)
+        #expect((encoded["text"]?.stringValue?.utf8.count ?? .max) <= MCPResultEncoder.defaultMaxBytes)
+        #expect(encoded["truncated"] == .bool(true))
+    }
+}
