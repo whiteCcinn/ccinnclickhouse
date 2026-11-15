@@ -642,7 +642,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         context.statement = executed
         let timeout = min(max(args.double("timeout_seconds") ?? Self.defaultTimeout, 1), Self.maxTimeout)
         // Read-only calls are also enforced by ClickHouse itself (readonly=1).
-        let result = try await client.run(executed, options: QueryOptions(purpose: "mcp", database: args.string("database"),
+        let result = try await client.run(executed, options: QueryOptions(purpose: "mcp", database: Self.database(args, client),
                                                                           limits: RowLimits(maxRows: limit, maxBytes: 64 * 1024 * 1024),
                                                                           timeout: timeout, readOnly: true, idempotent: true))
         var payload = Self.encode(result: result, limit: limit)
@@ -675,7 +675,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         let body = SQLStatementKind.of(statement) == .explain ? statement : "\(prefix) \(statement)"
         if let reason = ReadOnlySQLGuard.check(body) { throw MCPToolError(reason) }
         context.statement = body
-        let result = try await client.run(body, options: QueryOptions(purpose: "mcp", database: args.string("database"),
+        let result = try await client.run(body, options: QueryOptions(purpose: "mcp", database: Self.database(args, client),
                                                                       limits: RowLimits(maxRows: 20_000, maxBytes: 16 * 1024 * 1024),
                                                                       timeout: Self.defaultTimeout, readOnly: true, idempotent: true))
         if result.columns.count > 1 {
@@ -698,7 +698,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         guard statements.count == 1, let statement = statements.first?.text else { throw MCPToolError("Pass exactly one statement per call.") }
         context.statement = statement
         let timeout = min(max(args.double("timeout_seconds") ?? Self.defaultTimeout, 1), Self.maxTimeout)
-        let result = try await client.run(statement, options: QueryOptions(purpose: "mcp", database: args.string("database"),
+        let result = try await client.run(statement, options: QueryOptions(purpose: "mcp", database: Self.database(args, client),
                                                                            limits: RowLimits(maxRows: Self.maxRowLimit, maxBytes: 64 * 1024 * 1024),
                                                                            timeout: timeout))
         var payload = Self.encode(result: result, limit: Self.maxRowLimit)
@@ -706,6 +706,12 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         payload["written_rows"] = .int(result.writtenRows)
         context.rows = payload["row_count"]?.intValue.map { Int(clamping: $0) }
         return .object(payload)
+    }
+
+    /// The `database` argument, else the connection's default database. Every MCP call is a stateless
+    /// request (no server session), so a `USE` or `SET` of one call never carries into the next.
+    static func database(_ args: Arguments, _ client: ClickHouseClient) -> String? {
+        args.string("database")?.trimmingCharacters(in: .whitespaces).nilIfEmpty ?? client.configuration.database
     }
 
     // MARK: Encoding

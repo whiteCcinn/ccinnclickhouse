@@ -99,6 +99,25 @@ struct MCPIntegrationTests {
         #expect(created["result"]?["isError"] == .bool(false))
         _ = try await process.request(["jsonrpc": "2.0", "id": 4, "method": "tools/call",
                                        "params": ["name": "execute_statement", "arguments": ["sql": "DROP TABLE IF EXISTS shop.mcp_scratch"]]])
+
+        // MCP calls never share a server session: SET, USE and temporary tables of one call do not carry
+        // into the next.
+        func call(_ id: Int, _ tool: String, _ sql: String) async throws -> JSONValue {
+            try await process.request(["jsonrpc": "2.0", "id": .int(Int64(id)), "method": "tools/call",
+                                       "params": ["name": .string(tool), "arguments": ["sql": .string(sql)]]])
+        }
+        // (2025-03-26 clients get the result as JSON text only.)
+        func text(_ response: JSONValue) -> String { response["result"]?["content"]?[0]?["text"]?.stringValue ?? "" }
+        _ = try await call(20, "execute_statement", "SET max_threads = 3")
+        let threads = try await call(21, "run_query", "SELECT toString(getSetting('max_threads')) AS t")
+        #expect(threads["result"]?["isError"] == .bool(false))
+        #expect(!text(threads).contains("[\"3\"]"), "\(text(threads))")
+        _ = try await call(22, "execute_statement", "USE system")
+        let database = try await call(23, "run_query", "SELECT currentDatabase() AS db")
+        #expect(text(database).contains("[\"shop\"]"), "\(text(database))")
+        _ = try await call(24, "execute_statement", "CREATE TEMPORARY TABLE mcp_tmp (a UInt8)")
+        let temporary = try await call(25, "run_query", "SELECT count() FROM mcp_tmp")
+        #expect(temporary["result"]?["isError"] == .bool(true), "\(temporary)")
         // 2025-03-26 clients get no structuredContent.
         #expect(created["result"]?["structuredContent"] == nil)
     }
