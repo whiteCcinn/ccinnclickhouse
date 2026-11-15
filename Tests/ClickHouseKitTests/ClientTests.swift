@@ -755,3 +755,48 @@ struct TolerantMetadataTests {
         await #expect(throws: ClickHouseError.self) { _ = try await client.tolerant("SELECT * FROM system.settings") }
     }
 }
+
+@Suite("Kills aimed at the node that runs the query", .serialized)
+struct HostTargetedKillTests {
+    static let processes = "host\tquery_id\tinitial_query_id\tis_initial_query\tuser\telapsed\tquery\nString\tString\tString\tUInt8\tString\tFloat64\tString\n"
+
+    @Test func killsCarryTheHostAndOnClusterOnlyMatchesIt() async throws {
+        let server = try await FakeClickHouseServer { request in
+            if request.sql.hasPrefix("KILL QUERY") { return .tsv("kill_status\tquery_id\nString\tString\n") }
+            if request.sql.contains("FROM system.processes") || request.sql.contains("clusterAllReplicas") {
+                return .tsv(Self.processes + "node-2\tsame-id\tsame-id\t1\tbob\t3.5\tSELECT sleep(3)\n")
+            }
+            return FakeAnswers.standard(request) ?? .empty()
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        let query = try #require(try await client.runningQueries(cluster: "c", includeAppMonitoring: true).first)
+        #expect(query.host == "node-2")
+        _ = try await client.kill(query, cluster: "c")
+        let kills = server.requests(containing: "KILL QUERY")
+        #expect(!kills.isEmpty)
+        #expect(kills.allSatisfy { $0.sql.contains("hostName() = 'node-2'") }, "\(kills.map(\.sql))")
+        #expect(kills.contains { $0.sql.contains("ON CLUSTER") }, "a remote query that no attempt found falls back to ON CLUSTER")
+    }
+
+    @Test func aLoadBalancerFoundDuringTheKillTriggersRetries() async throws {
+        // The probe and schema came from one node, so the client does not know yet that it is behind a
+        // load balancer; the query runs on the probe node but the kill lands elsewhere first.
+        let attempt = OSAllocatedUnfairLock(initialState: 0)
+        let server = try await FakeClickHouseServer { request in
+            if request.sql.hasPrefix("KILL QUERY") {
+                let count = attempt.withLock { value -> Int in value += 1; return value }
+                if count == 1 { return .tsv("kill_status\tquery_id\nString\tString\n", headers: ["X-ClickHouse-Server-Display-Name": "other-node"]) }
+                return .tsv("kill_status\tquery_id\nString\tString\nwaiting\tq-local\n")
+            }
+            return FakeAnswers.standard(request) ?? .empty()
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        #expect(!client.isLoadBalanced)
+        #expect(try await client.killQuery(queryID: "q-local") == .killed(status: "waiting"))
+        #expect(server.requests(containing: "KILL QUERY").count == 2)
+    }
+}

@@ -264,32 +264,38 @@ public final class ClickHouseClient: Sendable {
         case notFound
     }
 
-    /// `KILL QUERY WHERE query_id = …` (design D5). When the query may run on another node (the endpoint
-    /// is load-balanced, or the caller knows it runs on a different host) the kill is retried on fresh
-    /// connections and finally sent `ON CLUSTER` when a cluster is known.
+    /// `KILL QUERY WHERE query_id = …` (design D5). `host` (the `hostName()` that listed the query)
+    /// restricts the kill to that node, so a query with the same id elsewhere is never hit. When the
+    /// query may run on another node (the caller says so, or the endpoint is — or turns out during the
+    /// kill to be — load-balanced) the kill is retried on fresh connections and finally sent
+    /// `ON CLUSTER` when a cluster is known.
     @discardableResult
-    public func killQuery(queryID: String, cluster: String? = nil, onAnotherNode: Bool = false, sync: Bool = false) async throws -> KillOutcome {
-        let sql = "KILL QUERY WHERE \(processCondition(queryID: queryID)) \(sync ? "SYNC" : "ASYNC")"
-        let remote = onAnotherNode || isLoadBalanced
-        let attempts = remote ? 8 : 1
+    public func killQuery(queryID: String, cluster: String? = nil, onAnotherNode: Bool = false, host: String? = nil,
+                          sync: Bool = false) async throws -> KillOutcome {
+        let condition = processCondition(queryID: queryID)
+            + (host.flatMap { $0.isEmpty ? nil : " AND hostName() = \(SQLText.literal($0))" } ?? "")
+        let sql = "KILL QUERY WHERE \(condition) \(sync ? "SYNC" : "ASYNC")"
         let builder = builder
         let transport = transport
         return try await Deadline.run(seconds: 30, timeoutError: { ClickHouseError(.timeout, "The server did not answer KILL QUERY in time") }) {
-            for attempt in 0..<attempts {
+            for attempt in 0..<8 {
                 try Task.checkCancellation()
                 let outcome = try await Self.run(sql, builder: builder, transport: transport,
                                                  options: QueryOptions(purpose: "kill", limits: .metadata, timeout: 10, waitEndOfQuery: true,
                                                                        readOnly: false, idempotent: true),
                                                  freshConnection: attempt > 0)
+                // A different node answering reveals a load balancer even if the probe did not.
+                self.noteNode(outcome.result.serverDisplayName)
                 if let row = outcome.result.first {
                     return KillOutcome.killed(status: row.text("kill_status"))
                 }
+                if !(onAnotherNode || self.isLoadBalanced) { break }
             }
-            guard remote, let cluster = cluster ?? self.configuration.defaultCluster, !cluster.isEmpty else {
+            guard onAnotherNode || self.isLoadBalanced, let cluster = cluster ?? self.configuration.defaultCluster, !cluster.isEmpty else {
                 return KillOutcome.notFound
             }
             do {
-                let onCluster = "KILL QUERY ON CLUSTER \(SQLText.quoteIdentifier(cluster)) WHERE \(self.processCondition(queryID: queryID)) ASYNC"
+                let onCluster = "KILL QUERY ON CLUSTER \(SQLText.quoteIdentifier(cluster)) WHERE \(condition) ASYNC"
                 let outcome = try await Self.run(onCluster, builder: builder, transport: transport,
                                                  options: QueryOptions(purpose: "kill", limits: .metadata, timeout: 15, waitEndOfQuery: true,
                                                                        readOnly: false))

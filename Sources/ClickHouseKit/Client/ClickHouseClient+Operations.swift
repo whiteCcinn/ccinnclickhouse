@@ -20,7 +20,7 @@ extension ClickHouseClient {
     public func kill(_ query: RunningQuery, cluster: String? = nil) async throws -> KillOutcome {
         let target = query.isInitialQuery ? query.queryID : (query.initialQueryID ?? query.queryID)
         let local = query.host == nil || query.host == serverInfo.hostName
-        return try await killQuery(queryID: target, cluster: cluster, onAnotherNode: !local)
+        return try await killQuery(queryID: target, cluster: cluster, onAnotherNode: !local, host: query.host)
     }
 
     /// Live progress of a running query (`system.processes`), `nil` once it is no longer running.
