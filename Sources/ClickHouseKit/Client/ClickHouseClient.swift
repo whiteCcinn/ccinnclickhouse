@@ -48,8 +48,9 @@ public final class ClickHouseClient: Sendable {
         let transport = transportFactory(effective)
         do {
             var nodes = Set<String>()
-            let (probe, capabilities) = try await Deadline.run(seconds: max(1, configuration.connectTimeout) * 2, timeoutError: {
-                ClickHouseError(.timeout, "\(configuration.endpoint) did not answer within \(Int(configuration.connectTimeout * 2)) s")
+            let probeSeconds = ConnectionConfiguration.sanitizedConnectTimeout(configuration.connectTimeout) * 2
+            let (probe, capabilities) = try await Deadline.run(seconds: probeSeconds, timeoutError: {
+                ClickHouseError(.timeout, "\(configuration.endpoint) did not answer within \(wholeSeconds(probeSeconds)) s")
             }) {
                 var learned = ConnectionCapabilities()
                 let info = try await Self.probe(effective, baseURL: baseURL, transport: transport, capabilities: &learned)
@@ -203,7 +204,7 @@ public final class ClickHouseClient: Sendable {
             let outcome: ResponseReader.Outcome
             if let timeout = options.timeout, timeout.isFinite {
                 outcome = try await Deadline.run(seconds: timeout, timeoutError: {
-                    ClickHouseError(.timeout, "The statement did not finish within \(Int(timeout)) s")
+                    ClickHouseError(.timeout, "The statement did not finish within \(wholeSeconds(timeout)) s")
                 }, work)
             } else {
                 outcome = try await work()

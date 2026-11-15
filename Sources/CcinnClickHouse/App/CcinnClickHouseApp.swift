@@ -208,7 +208,7 @@ enum LaunchArguments {
             profile = ConnectionProfile(name: value("--name") ?? "\(host):\(port)", host: host, port: port, secure: secure,
                                         username: value("--user") ?? "default", defaultDatabase: value("--database"),
                                         defaultCluster: value("--cluster"), readOnly: arguments.contains("--read-only"), color: .orange,
-                                        connectTimeout: value("--connect-timeout").flatMap(Double.init) ?? 30)
+                                        connectTimeout: value("--connect-timeout").flatMap(Double.init).flatMap { $0.isFinite ? $0 : nil } ?? 30)
             password = ProcessInfo.processInfo.environment["CCINNCLICKHOUSE_PASSWORD"] ?? ""
         } else {
             return

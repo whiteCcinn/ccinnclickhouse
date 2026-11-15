@@ -36,7 +36,8 @@ extension ClickHouseClient {
         let result = try await run(sql, options: QueryOptions(purpose: "poll", limits: RowLimits(maxRows: 1), timeout: 10, waitEndOfQuery: true, idempotent: true))
         guard let record = result.first else { return nil }
         var progress = QueryProgress()
-        progress.elapsedNanoseconds = Int64(min(9.2e18, max(0, (record.double("elapsed") ?? 0) * 1e9)))
+        let elapsed = record.double("elapsed") ?? 0
+        progress.elapsedNanoseconds = elapsed.isFinite ? Int64(min(9.2e18, max(0, elapsed * 1e9))) : 0
         progress.readRows = max(0, record.int("read_rows") ?? 0)
         progress.readBytes = max(0, record.int("read_bytes") ?? 0)
         progress.totalRowsToRead = max(0, record.int("total_rows_approx") ?? 0)

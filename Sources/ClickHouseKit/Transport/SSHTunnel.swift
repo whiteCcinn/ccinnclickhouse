@@ -90,7 +90,7 @@ public final class SSHTunnel: Sendable {
     public static func open(configuration: SSHTunnelConfiguration, secret: String?, remote: Endpoint,
                             timeout: Double = 20) async throws -> SSHTunnel {
         let localPort = try freeLocalPort()
-        let arguments = try arguments(for: configuration, localPort: localPort, remote: remote, connectTimeout: Int(timeout))
+        let arguments = try arguments(for: configuration, localPort: localPort, remote: remote, connectTimeout: max(1, min(wholeSeconds(timeout), 300)))
         let askPass = try AskPassHelper.shared.path()
         // The secret is handed to askpass through a 0600 file that is deleted as soon as the tunnel is
         // up (or failed), instead of living in the environment of the long-running ssh processes.

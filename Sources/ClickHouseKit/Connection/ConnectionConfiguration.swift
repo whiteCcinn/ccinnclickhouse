@@ -63,13 +63,18 @@ public struct ConnectionConfiguration: Sendable, Equatable {
         self.password = password
         self.database = database
         self.defaultCluster = defaultCluster
-        self.connectTimeout = connectTimeout
+        self.connectTimeout = Self.sanitizedConnectTimeout(connectTimeout)
         self.readOnly = readOnly
         self.compression = compression
         self.tls = tls
         self.tlsServerName = tlsServerName
         self.sessionTimeout = sessionTimeout
         self.applicationName = applicationName
+    }
+
+    /// A usable connect timeout: finite, 1…300 s (non-finite values such as `nan` fall back to 10 s).
+    public static func sanitizedConnectTimeout(_ value: Double) -> Double {
+        value.isFinite ? min(max(value, 1), 300) : 10
     }
 
     /// `http(s)://host:port/prefix/`.

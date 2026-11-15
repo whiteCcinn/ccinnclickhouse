@@ -800,3 +800,25 @@ struct HostTargetedKillTests {
         #expect(server.requests(containing: "KILL QUERY").count == 2)
     }
 }
+
+@Suite("Numeric inputs never trap", .serialized)
+struct NumericSafetyTests {
+    @Test func timeoutsAreSanitized() async throws {
+        #expect(ConnectionConfiguration(endpoint: Endpoint(host: "h", port: 1), connectTimeout: .nan).connectTimeout == 10)
+        #expect(ConnectionConfiguration(endpoint: Endpoint(host: "h", port: 1), connectTimeout: .infinity).connectTimeout == 10)
+        #expect(ConnectionConfiguration(endpoint: Endpoint(host: "h", port: 1), connectTimeout: 1e12).connectTimeout == 300)
+        #expect(wholeSeconds(.nan) == 0)
+        #expect(wholeSeconds(1e300) == 1_000_000_000)
+        #expect(wholeSeconds(-.infinity) == 0)
+        #expect(wholeSeconds(2.1) == 3)
+    }
+
+    @Test func aNaNConnectTimeoutSetAfterInitStillConnects() async throws {
+        let server = try await FakeClickHouseServer { request in FakeAnswers.standard(request) ?? .empty() }
+        defer { server.stop() }
+        var settings = configuration(port: server.port)
+        settings.connectTimeout = .nan
+        let client = try await ClickHouseClient.connect(settings)
+        await client.close()
+    }
+}
