@@ -147,3 +147,25 @@ struct ChartTests {
         #expect(ChartX.date(Date(timeIntervalSince1970: 0)).label == "1970-01-01")
     }
 }
+
+@Suite("Private files")
+struct PrivateFileTests {
+    @Test func everyWriteIsCreatedWithMode0600AndLeavesNoTemporaryFiles() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ccinnch-private-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("connections.json")
+        // A file someone left world-readable is replaced by a private one.
+        FileManager.default.createFile(atPath: file.path, contents: Data("old".utf8), attributes: [.posixPermissions: 0o644])
+        let previousUmask = umask(0o022)
+        defer { umask(previousUmask) }
+        for round in 0..<3 {
+            try PrivateFile.write(Data("round \(round)".utf8), to: file)
+            let permissions = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber
+            #expect(permissions?.intValue == 0o600)
+            #expect(try String(contentsOf: file, encoding: .utf8) == "round \(round)")
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["connections.json"])
+        #expect(throws: (any Error).self) { try PrivateFile.write(Data(), to: directory.appendingPathComponent("missing/dir/file")) }
+    }
+}

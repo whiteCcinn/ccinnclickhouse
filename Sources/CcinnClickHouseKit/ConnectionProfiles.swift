@@ -313,8 +313,7 @@ public final class ProfileRepository: Sendable {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        try encoder.encode(profiles).write(to: fileURL, options: [.atomic])
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        try PrivateFile.write(try encoder.encode(profiles), to: fileURL)
     }
 
     public func storeSecrets(for profile: ConnectionProfile, password: String?, sshSecret: String?) throws {

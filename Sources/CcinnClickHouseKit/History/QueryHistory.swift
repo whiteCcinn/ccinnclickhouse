@@ -91,7 +91,6 @@ public actor QueryHistoryStore {
         guard let data = try? encoder.encode(all) else { return }
         try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
-        try? data.write(to: fileURL, options: [.atomic])
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        try? PrivateFile.write(data, to: fileURL)
     }
 }
