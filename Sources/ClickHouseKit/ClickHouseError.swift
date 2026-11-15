@@ -74,7 +74,19 @@ public struct ClickHouseError: Error, LocalizedError, Sendable, Equatable, Custo
     /// network, Keeper failures) is a real failure and must surface.
     public var isFeatureUnavailable: Bool {
         guard kind == .server, let code else { return false }
-        return Self.featureUnavailableCodes.contains(code)
+        return Self.featureUnavailableCodes.contains(code) || isKeeperNotConfigured
+    }
+
+    /// The server has no Keeper/ZooKeeper configured. The error differs by version: NO_ZOOKEEPER (225),
+    /// NO_ELEMENTS_IN_CONFIG (139, "There is no Zookeeper configuration in server config", 23.x+) and
+    /// KEEPER_EXCEPTION (999, "No hosts passed to ZooKeeper constructor", 22.x). A Keeper that is
+    /// configured but failing (connection loss, session expired) is not this.
+    public var isKeeperNotConfigured: Bool {
+        guard kind == .server else { return false }
+        if code == 225 || name == "NO_ZOOKEEPER" { return true }
+        let lowered = message.lowercased()
+        return lowered.contains("no zookeeper configuration") || lowered.contains("no hosts passed to zookeeper constructor")
+            || lowered.contains("zookeeper is not configured")
     }
 
     /// THERE_IS_NO_COLUMN, NOT_FOUND_COLUMN_IN_BLOCK, NO_SUCH_COLUMN_IN_TABLE, BAD_ARGUMENTS,

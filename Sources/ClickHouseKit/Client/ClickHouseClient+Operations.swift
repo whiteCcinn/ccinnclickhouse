@@ -151,8 +151,8 @@ extension ClickHouseClient {
         } catch let error as ClickHouseError where error.kind == .server {
             let lowered = error.message.lowercased()
             // Without a <zookeeper> section the system.zookeeper table does not exist at all (UNKNOWN_TABLE).
-            if error.code == 60 || lowered.contains("no zookeeper") || lowered.contains("not configured") || lowered.contains("zookeeper is not")
-                || error.name == "NO_ZOOKEEPER" {
+            if error.code == 60 || error.isKeeperNotConfigured || lowered.contains("no zookeeper") || lowered.contains("not configured")
+                || lowered.contains("zookeeper is not") {
                 return KeeperStatus(state: .notConfigured)
             }
             return KeeperStatus(state: .unavailable(error.message))

@@ -51,11 +51,12 @@ struct MCPIntegrationTests {
         let rejected = try await process.request(["jsonrpc": "2.0", "id": 8, "method": "tools/call",
                                                   "params": ["name": "run_query", "arguments": ["sql": "DROP TABLE shop.events"]]])
         #expect(rejected["result"]?["isError"] == .bool(true))
-        // …and ClickHouse enforces readonly=1 for what passes the guard (table functions are refused server-side).
-        let serverSide = try await process.request(["jsonrpc": "2.0", "id": 9, "method": "tools/call",
-                                                    "params": ["name": "run_query", "arguments": ["sql": "SELECT * FROM url('http://127.0.0.1:1/x', CSV, 'a String')"]]])
-        #expect(serverSide["result"]?["isError"] == .bool(true))
-        #expect(serverSide["result"]?["content"]?[0]?["text"]?.stringValue?.contains("164") == true)
+        // …and external access as well (ClickHouse refuses it too at readonly=1; ReadOnlyEnforcementIntegrationTests
+        // checks the server side with a request-counting listener).
+        let external = try await process.request(["jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                                                  "params": ["name": "run_query", "arguments": ["sql": "SELECT * FROM url('http://127.0.0.1:1/x', CSV, 'a String')"]]])
+        #expect(external["result"]?["isError"] == .bool(true))
+        #expect(external["result"]?["content"]?[0]?["text"]?.stringValue?.contains("outside ClickHouse") == true)
 
         let explain = try await process.call(id: 10, "explain_query", ["sql": "SELECT count() FROM shop.events WHERE user_id = 1", "kind": "plan_indexes"])
         #expect(explain["plan"]?.stringValue?.contains("Indexes") == true)

@@ -7,6 +7,11 @@
             <readonly>1</readonly>
             <max_memory_usage>200000000</max_memory_usage>
         </readonly_profile>
+        <!-- readonly=2: read-only, but other settings may change; any change of `readonly` is refused. -->
+        <readonly2_profile>
+            <readonly>2</readonly>
+            <max_memory_usage>200000000</max_memory_usage>
+        </readonly2_profile>
     </profiles>
     <users>
         <default remove="1"/>
@@ -23,5 +28,11 @@
             <profile>readonly_profile</profile>
             <quota>default</quota>
         </reader>
+        <reader2>
+            <password>reader2-pass</password>
+            <networks><ip>::/0</ip></networks>
+            <profile>readonly2_profile</profile>
+            <quota>default</quota>
+        </reader2>
     </users>
 </clickhouse>

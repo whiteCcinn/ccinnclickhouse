@@ -230,6 +230,22 @@ struct ClickHouseIntegrationTests {
         #expect(try await client.tables(database: "shop").isEmpty == false)
     }
 
+    @Test func readonlyTwoUserConnectsReadOnly() async throws {
+        // A server profile at readonly=2 refuses any change of `readonly`; the app must not send it and
+        // keeps the other settings (they may change at readonly=2).
+        let client = try await ClickHouseClient.connect(ITEnvironment.configuration(user: "reader2", password: "reader2-pass", readOnly: true))
+        defer { Task { await client.close() } }
+        #expect(client.serverInfo.readonlyLevel == 2)
+        #expect(client.capabilities.serverEnforcesReadOnly)
+        #expect(!client.capabilities.settingsLocked)
+        #expect(try await client.run("SELECT 1 AS x", options: QueryOptions(timeout: 10)).rows == [["1"]])
+        await #expect(throws: ClickHouseError.self) { _ = try await client.run("CREATE TABLE shop.should_not_exist (a UInt8) ENGINE = Memory") }
+        // MCP run_query asks for readonly=1 per request, also on read-write profiles.
+        let writable = try await ClickHouseClient.connect(ITEnvironment.configuration(user: "reader2", password: "reader2-pass"))
+        defer { Task { await writable.close() } }
+        #expect(try await writable.run("SELECT 2", options: QueryOptions(readOnly: true)).rows == [["2"]])
+    }
+
     @Test func largeStatementsAreCompressed() async throws {
         let client = try await ITEnvironment.connect()
         defer { Task { await client.close() } }

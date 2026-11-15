@@ -743,6 +743,29 @@ struct TolerantMetadataTests {
         #expect(try await client.tolerant("SELECT * FROM system.future_table") == nil)
     }
 
+    /// The exact "no Keeper configured" errors of 22.8 and 23.8–26.8 (seen live on the distributed DDL queue).
+    @Test(arguments: [(139, "NO_ELEMENTS_IN_CONFIG", "There is no Zookeeper configuration in server config"),
+                      (999, "KEEPER_EXCEPTION", "Coordination::Exception: No hosts passed to ZooKeeper constructor. (Bad arguments)")])
+    func noKeeperConfiguredYieldsNil(code: Int, name: String, message: String) async throws {
+        let server = try await FakeClickHouseServer { request in
+            FakeAnswers.standard(request) ?? .exception(code: code, name: name, message: message)
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        #expect(try await client.tolerant("SELECT * FROM system.distributed_ddl_queue") == nil)
+    }
+
+    @Test func aFailingKeeperStillSurfaces() async throws {
+        let server = try await FakeClickHouseServer { request in
+            FakeAnswers.standard(request) ?? .exception(code: 999, name: "KEEPER_EXCEPTION", message: "Coordination::Exception: Connection loss")
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        await #expect(throws: ClickHouseError.self) { _ = try await client.tolerant("SELECT * FROM system.distributed_ddl_queue") }
+    }
+
     @Test(arguments: [(159, "TIMEOUT_EXCEEDED"), (394, "QUERY_WAS_CANCELLED"), (241, "MEMORY_LIMIT_EXCEEDED"),
                       (202, "TOO_MANY_SIMULTANEOUS_QUERIES"), (209, "SOCKET_TIMEOUT"), (210, "NETWORK_ERROR"), (999, "KEEPER_EXCEPTION")])
     func realFailuresPropagate(code: Int, name: String) async throws {
