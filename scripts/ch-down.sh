@@ -4,4 +4,4 @@ set -uo pipefail
 containers=$(docker ps -a --format '{{.Names}}' | grep '^ccinnch-it-' || true)
 [ -n "$containers" ] && docker rm -f $containers >/dev/null
 docker network rm ccinnch-it-net >/dev/null 2>&1 || true
-echo "removed: ${containers:-nothing}"
+echo "removed: $(echo ${containers:-nothing})"
