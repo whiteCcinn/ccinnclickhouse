@@ -20,5 +20,12 @@ First public release.
 - Charts from any result: automatic suggestion, bar / line / area / scatter / pie with series and aggregation, reduced to at most 2,000 points.
 - MCP server (`CcinnClickHouse mcp`) so AI clients such as Claude Code, Codex and Claude Desktop can explore databases, tables, parts, merges and mutations, replication, running queries, the query log, storage, dictionaries and the cluster, and run read-only queries on connections the user opted in; read & write access is opt-in per connection, read-only is enforced by ClickHouse (`readonly=1`), and every call is audited.
 
+### Security
+
+- Read-only connections verify on the real request path that ClickHouse applies `readonly` and refuse to open otherwise: chproxy (1.30) drops `readonly=1`, which would let `url()` and friends reach the network. Users whose profile is `readonly=2` are supported.
+- The read-only guard (MCP `run_query`, read-only editor batches) refuses functions that reach outside ClickHouse, table functions outside an allow-list, per-query `SETTINGS`, `SYSTEM`, `KILL`, `OPTIMIZE`, `INTO OUTFILE` and `EXPLAIN` of writes, with a lexer that splits statements exactly like ClickHouse.
+- History and the MCP audit log redact passwords, keys and tokens in statements and in server error text, and are written with mode 0600 from creation.
+- A running MCP server re-reads AI access on every call, so revoking access in Settings takes effect immediately.
+
 [Unreleased]: https://github.com/whiteCcinn/ccinnclickhouse/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/whiteCcinn/ccinnclickhouse/releases/tag/v1.0.0

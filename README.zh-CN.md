@@ -63,7 +63,7 @@ CcinnClickHouse 把这些都放在一次点击之内。它是原生 SwiftUI/AppK
 - **连接**
   - HTTP 与 **HTTPS**（支持私有 CA，测试环境可跳过校验），反向代理路径前缀，**chproxy** 与负载均衡。
   - 通过系统 OpenSSH 的 SSH 隧道（agent、密钥或密码）。
-  - **由 ClickHouse 强制执行的只读连接**（`readonly=1`），以及执行修改数据或结构的语句前可选的确认。
+  - **由 ClickHouse 强制执行的只读连接**（`readonly=1`，连接时在真实请求路径上验证），以及执行修改数据或结构的语句前可选的确认。
 - **通过 MCP 让 AI 访问。** 内置 Model Context Protocol 服务，让 Claude Code、Codex、Claude Desktop 浏览并查询你授权的连接，默认只读。详见 [MCP 服务](#mcp-服务让-ai-查询-clickhouse)。
 - **默认安全。** 密码保存在 macOS 钥匙串中；除非你开启 AI 访问，否则不会收集或发送任何数据。
 
@@ -164,7 +164,9 @@ CcinnClickHouse 内置 **Model Context Protocol** 服务。**Claude Code**、**C
 
 - 密码留在钥匙串中，绝不会展示给 AI。
 - 只有你启用的连接可见。
-- `run_query` 只接受单条只读语句（`SELECT`、`WITH`、`SHOW`、`DESCRIBE`、`EXISTS`、`EXPLAIN`）。应用用自己的 SQL 词法分析器做检查，**ClickHouse 也会强制执行**：只读连接的每个请求都带有 `readonly=1`。
+- `run_query` 只接受单条只读语句（`SELECT`、`WITH`、`SHOW`、`DESCRIBE`、`EXISTS`、`EXPLAIN`）。应用用自己的 SQL 词法分析器做检查，并拒绝访问 ClickHouse 外部的函数（`url`、`file`、`s3`、`remote`、`mysql`、`executable` 等）、白名单以外的表函数以及查询级 `SETTINGS`。
+- **ClickHouse 也会强制执行**：只读连接的每个请求都带有 `readonly=1`，并且连接在使用前会在真实请求路径上检查 `getSetting('readonly')`。**chproxy 等代理会丢弃 `readonly`**；经由这类代理的只读访问会被拒绝，除非代理背后的 ClickHouse 用户本身使用只读设置配置（把代理用户映射到这样的用户）。
+- 在设置中修改连接的 AI 访问权限，会立即作用于正在运行的 MCP 服务。
 - 结果最多 1,000 行（默认 200 行）、约 256 KB。语句默认 30 秒超时（最长 120 秒）。
 - 在 AI 客户端中取消请求会停止 ClickHouse 上的查询。
 - `--read-only` 把所有连接限制为只读；`--profile <name>` 指定默认连接。

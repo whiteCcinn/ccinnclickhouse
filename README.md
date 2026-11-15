@@ -63,7 +63,7 @@ CcinnClickHouse puts all of that one click away, in a native SwiftUI/AppKit app 
 - **Connectivity**
   - HTTP and **HTTPS** (with a private CA, or skip verification for tests), path prefixes for reverse proxies, **chproxy** and load balancers.
   - SSH tunnels through your system OpenSSH (agent, key or password).
-  - **Read-only connections enforced by ClickHouse** (`readonly=1`), and optional confirmation before statements that change data or schema.
+  - **Read-only connections enforced by ClickHouse** (`readonly=1`, verified on the real request path when connecting), and optional confirmation before statements that change data or schema.
 - **AI access through MCP.** A built-in Model Context Protocol server lets Claude Code, Codex and Claude Desktop explore and query the connections you opt in, read-only by default. See [MCP server](#mcp-server-let-ai-query-clickhouse).
 - **Secure by default.** Passwords live in the macOS Keychain; nothing is collected or sent anywhere unless you enable AI access.
 
@@ -164,7 +164,9 @@ CcinnClickHouse has a built-in **Model Context Protocol** server. AI assistants 
 
 - Passwords stay in the Keychain and are never shown to the AI.
 - Only connections you enabled are visible.
-- `run_query` accepts a single read-only statement (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXISTS`, `EXPLAIN`). The app checks this with its own SQL lexer, and **ClickHouse enforces it too**: every request of a read-only connection carries `readonly=1`.
+- `run_query` accepts a single read-only statement (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXISTS`, `EXPLAIN`). The app checks this with its own SQL lexer and also refuses functions that reach outside ClickHouse (`url`, `file`, `s3`, `remote`, `mysql`, `executable`, …), table functions outside a small allow-list and per-query `SETTINGS`.
+- **ClickHouse enforces it too**: every request of a read-only connection carries `readonly=1`, and the connection checks `getSetting('readonly')` on the actual request path before it is used. Proxies such as **chproxy drop `readonly`**; read-only access through them is refused unless the ClickHouse user behind the proxy has a read-only settings profile (map the proxy user to such a user).
+- Changing a connection's AI access in Settings applies to a running MCP server immediately.
 - Results are capped at 1,000 rows (200 by default) and about 256 KB. Statements time out after 30 s by default (at most 120 s).
 - Cancelling a request in the AI client stops the query on ClickHouse.
 - `--read-only` caps every connection at read-only; `--profile <name>` picks the default connection.
