@@ -18,6 +18,15 @@ enum Loadable<Value> {
         if case .loading = self { return true }
         return false
     }
+
+    func map<Other>(_ transform: (Value) -> Other) -> Loadable<Other> {
+        switch self {
+        case .idle: .idle
+        case .loading: .loading
+        case let .loaded(value): .loaded(transform(value))
+        case let .failed(message): .failed(message)
+        }
+    }
 }
 
 /// State of one table tab. Sections load lazily and independently; every load carries a generation
@@ -213,13 +222,16 @@ final class ObjectDetailModel {
     func loadPartitions() {
         guard table.family.hasParts else { return }
         let table = table
-        run("partitions", { self.partitions = $0 }) {
+        // The limits are published together with the partitions, so a superseded load cannot overwrite them.
+        run("partitions", { (outcome: Loadable<(partitions: [PartitionSummary], limits: MergeTreeLimits)>) in
+            self.partitions = outcome.map(\.partitions)
+            if let value = outcome.value { self.limits = value.limits }
+        }) {
             async let partitions = self.client.partitions(database: table.database, table: table.name)
             async let limits = self.client.mergeTreeLimits()
             let resolvedLimits = try await limits
             let definition = try await self.client.table(database: table.database, name: table.name)?.engineDefinition
-            self.limits = resolvedLimits.overridden(by: definition)
-            return try await partitions
+            return (try await partitions, resolvedLimits.overridden(by: definition))
         }
     }
 
