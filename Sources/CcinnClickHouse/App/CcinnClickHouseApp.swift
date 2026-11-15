@@ -38,6 +38,8 @@ private struct SettingsTabs: View {
                 .tabItem { Label("MCP", systemImage: "sparkles") }
                 .tag("mcp")
         }
+        // `--snapshot … --settings mcp` opens this window too: keep it invisible and non-activating.
+        .background(BackgroundWindowConfigurator().frame(width: 0, height: 0))
     }
 }
 
