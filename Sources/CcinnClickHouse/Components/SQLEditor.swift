@@ -68,6 +68,7 @@ struct SQLEditor: NSViewRepresentable {
 
         context.coordinator.textView = textView
         textView.string = text
+        context.coordinator.lastSyncedText = text
         context.coordinator.textChanged()
         context.coordinator.observeScrolling(of: scrollView)
         if focusOnAppear {
@@ -81,9 +82,12 @@ struct SQLEditor: NSViewRepresentable {
         coordinator.parent = self
         guard let textView = coordinator.textView else { return }
         textView.isEditable = isEditable
-        if textView.string != text {
+        // Compare with the text the coordinator last synced (shares storage with `text` while nothing
+        // changed, so the check is O(1)) instead of bridging and comparing the whole document each update.
+        if text != coordinator.lastSyncedText {
             coordinator.isApplyingBinding = true
             textView.string = text
+            coordinator.lastSyncedText = text
             coordinator.isApplyingBinding = false
             let length = (text as NSString).length
             let clamped = NSRange(location: min(selection.location, length), length: 0)
@@ -113,6 +117,8 @@ struct SQLEditor: NSViewRepresentable {
         var isApplyingBinding = false
         var isTrackingSelection = false
         var lastErrorOffset: Int?
+        /// The text last exchanged with the binding.
+        var lastSyncedText = ""
         private var statements: [SQLStatement] = []
         private var highlightedStatement: NSRange?
         private var lastInserted = ""
@@ -153,7 +159,9 @@ struct SQLEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard !isApplyingBinding, let textView else { return }
-            parent.text = textView.string
+            let text = textView.string
+            lastSyncedText = text
+            parent.text = text
             textChanged()
             scheduleCompletion(force: false)
         }
@@ -186,33 +194,66 @@ struct SQLEditor: NSViewRepresentable {
             rehighlight()
         }
 
-        /// Re-lexes the text (linear, no layout work) and recolours what is on screen. Colours are layout
-        /// manager temporary attributes, so typing never invalidates the layout of the whole document.
+        /// Documents above this size are re-lexed off the main thread after typing pauses, so a keystroke
+        /// never pays for lexing megabytes of SQL.
+        private static let backgroundLexThreshold = 200_000
+        private var lexGeneration: UInt64 = 0
+        private var lexTask: Task<Void, Never>?
+
+        struct LexedText: Sendable {
+            var tokens: [SQLToken] = []
+            var statements: [SQLStatement] = []
+            var functionTokens = Set<Int>()
+        }
+
+        /// Tokens, statements and call sites of `text` (linear; no UI work, safe off the main actor).
+        nonisolated static func lex(_ text: String) -> LexedText {
+            let lexer = SQLLexer(text)
+            let tokens = lexer.tokens()
+            var functions = Set<Int>()
+            // ClickHouse has thousands of functions (and combinator forms): any identifier directly
+            // followed by `(` is highlighted as a call.
+            for index in tokens.indices.dropLast() where tokens[index].kind == .identifier {
+                let next = tokens[index + 1]
+                if next.kind == .punctuation, next.range.count == 1, next.range.lowerBound == tokens[index].range.upperBound,
+                   lexer.units[next.range.lowerBound] == 0x28 {
+                    functions.insert(index)
+                }
+            }
+            return LexedText(tokens: tokens, statements: SQLStatementSplitter.split(lexer: lexer, tokens: tokens), functionTokens: functions)
+        }
+
+        /// Re-lexes the text and recolours what is on screen. Colours are layout-manager temporary
+        /// attributes, so typing never invalidates the layout of the whole document. Large documents are
+        /// lexed in the background after a short pause; until then the previous tokens (bounds-checked
+        /// against the current length) keep colouring the view.
         func rehighlight() {
             guard let textView else { return }
             let text = textView.string
             lastErrorOffset = parent.errorOffset
             let length = (text as NSString).length
-            if length <= Self.highlightLimit {
-                let lexer = SQLLexer(text)
-                tokens = lexer.tokens()
-                statements = SQLStatementSplitter.split(lexer: lexer, tokens: tokens)
-                var functions = Set<Int>()
-                // ClickHouse has thousands of functions (and combinator forms): any identifier directly
-                // followed by `(` is highlighted as a call.
-                for index in tokens.indices.dropLast() where tokens[index].kind == .identifier {
-                    let next = tokens[index + 1]
-                    if next.kind == .punctuation, next.range.count == 1, next.range.lowerBound == tokens[index].range.upperBound,
-                       lexer.units[next.range.lowerBound] == 0x28 {
-                        functions.insert(index)
-                    }
+            lexGeneration &+= 1
+            lexTask?.cancel()
+            if length > Self.highlightLimit {
+                apply(LexedText())
+            } else if length > Self.backgroundLexThreshold {
+                let generation = lexGeneration
+                lexTask = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard !Task.isCancelled else { return }
+                    let lexed = await Task.detached(priority: .userInitiated) { Self.lex(text) }.value
+                    guard let self, !Task.isCancelled, self.lexGeneration == generation else { return }
+                    self.apply(lexed)
                 }
-                functionTokens = functions
             } else {
-                tokens = []
-                functionTokens = []
-                statements = []
+                apply(Self.lex(text))
             }
+        }
+
+        private func apply(_ lexed: LexedText) {
+            tokens = lexed.tokens
+            statements = lexed.statements
+            functionTokens = lexed.functionTokens
             highlightedRange = NSRange(location: 0, length: 0)
             highlightVisibleRange(force: true)
             highlightedStatement = nil
