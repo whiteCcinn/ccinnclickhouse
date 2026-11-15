@@ -129,11 +129,13 @@ struct ClusterIntegrationTests {
     }
 
     @Test func mcpGetClusterAndReplicationThroughTheProxy() async throws {
-        let profile = ConnectionProfile(name: "Proxy", host: "127.0.0.1", port: 18110, username: ITEnvironment.user,
+        // Read-only AI access through chproxy needs a ClickHouse user that is read-only itself (chproxy
+        // drops the readonly parameter); `reader` is mapped to such a user.
+        let profile = ConnectionProfile(name: "Proxy", host: "127.0.0.1", port: 18110, username: "reader",
                                         defaultCluster: ClusterEnvironment.cluster, mcpAccess: .readOnly)
         let tools = ClickHouseMCPTools(resolver: MCPProfileResolver(profiles: [profile], defaultProfile: nil, forceReadOnly: false),
                                        registry: MCPClientRegistry { profile, access in
-                                           try await ClientOpener.open(profile: profile, password: ITEnvironment.password, sshSecret: nil,
+                                           try await ClientOpener.open(profile: profile, password: "reader-pass", sshSecret: nil,
                                                                        readOnlyOverride: access != .readWrite)
                                        }, audit: nil)
         let cluster = await tools.call(name: "get_cluster", arguments: [:])
