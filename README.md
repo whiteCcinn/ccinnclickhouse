@@ -101,6 +101,14 @@ CcinnClickHouse speaks the **HTTP(S) interface** (ports 8123 / 8443) with typed 
 
 Each release lists SHA-256 checksums in `SHA256SUMS.txt`.
 
+### Updating
+
+Choose **CcinnClickHouse → Check for Updates…**. If a newer release exists, CcinnClickHouse shows what's new. **Download & Open** saves the disk image to your Downloads folder, checks it against the release's `SHA256SUMS.txt`, and opens it. Quit CcinnClickHouse, then drag the new version onto **Applications**.
+
+CcinnClickHouse also checks quietly once a day; turn this off in **Settings → General → Updates**. The check contacts only GitHub's public releases API, and you can **Skip This Version**.
+
+The project page, release notes and issue tracker are also in the **Help** menu and the About window.
+
 ## Quick start
 
 1. Click **New Connection** and enter the host and HTTP port (default **8123**, or **8443** with **HTTPS**), user and password. Optionally add a default database, the cluster name (for cluster-wide views and kills), an SSH tunnel, or mark the connection read-only.

@@ -101,6 +101,14 @@ CcinnClickHouse 使用 **HTTP(S) 接口**（端口 8123 / 8443）与带类型的
 
 每个版本都在 `SHA256SUMS.txt` 中列出 SHA-256 校验和。
 
+### 更新
+
+选择 **CcinnClickHouse → 检查更新…（Check for Updates…）**。如果有新版本，CcinnClickHouse 会显示更新内容。**下载并打开（Download & Open）** 会把磁盘映像保存到“下载”文件夹，按该版本的 `SHA256SUMS.txt` 校验后再打开。退出 CcinnClickHouse，然后把新版本拖到 **应用程序** 文件夹即可。
+
+CcinnClickHouse 每天也会在后台自动检查一次，可以在 **设置 → 通用 → 更新** 中关闭。检查只访问 GitHub 的公开 Releases API，也可以选择 **跳过此版本（Skip This Version）**。
+
+项目主页、发布说明和问题反馈入口也在 **帮助** 菜单和“关于”窗口中。
+
 ## 快速开始
 
 1. 点击 **New Connection**，填写主机与 HTTP 端口（默认 **8123**，开启 **HTTPS** 时为 **8443**）、用户名和密码。可选：默认数据库、集群名（用于全集群视图与 Kill）、SSH 隧道，或把连接标记为只读。
