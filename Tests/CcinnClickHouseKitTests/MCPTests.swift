@@ -339,13 +339,14 @@ struct MCPRevocationTests {
 
     @Test func aCancelledCallerCancelsAnOpenNobodyElseWaitsFor() async throws {
         let log = Opened()
-        let cache = makeCache(log, delay: .seconds(5))
+        let cache = makeCache(log, delay: .seconds(30))
         let call = Task { try await cache.value(id: UUID(), key: "slow") }
         try await Task.sleep(for: .milliseconds(100))
         let started = ContinuousClock.now
         call.cancel()
         await #expect(throws: ClickHouseError.self) { _ = try await call.value }
-        #expect(ContinuousClock.now - started < .seconds(2), "the cancelled call returned without waiting for the open")
+        // Well under the 30 s open. Generous bound: CI scheduling adds seconds of delay.
+        #expect(ContinuousClock.now - started < .seconds(10), "the cancelled call returned without waiting for the open")
         #expect(log.lock.withLock { $0.opened }.isEmpty)
     }
 

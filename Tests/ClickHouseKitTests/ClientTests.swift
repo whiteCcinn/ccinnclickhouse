@@ -262,7 +262,7 @@ struct ClientTests {
         let server = try await FakeClickHouseServer { request in
             if let answer = FakeAnswers.standard(request) { return answer }
             var response = FakeClickHouseServer.Response.tsv("n\nUInt64\n1\n")
-            response.headDelay = .seconds(10)
+            response.headDelay = .seconds(30)
             return response
         }
         defer { server.stop() }
@@ -278,7 +278,8 @@ struct ClientTests {
         } catch let error as ClickHouseError {
             #expect(error.kind == .cancelled)
         }
-        #expect(ContinuousClock.now - started < .seconds(3))
+        // Well under the 30 s response delay. Generous bound: CI scheduling adds seconds of delay.
+        #expect(ContinuousClock.now - started < .seconds(10))
         let killed = await eventually { !server.requests(containing: "KILL QUERY WHERE query_id = 'ccinnch-sql-cancel-me'").isEmpty }
         #expect(killed)
     }
