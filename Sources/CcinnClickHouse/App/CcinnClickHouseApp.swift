@@ -16,13 +16,18 @@ struct CcinnClickHouseApp: App {
         }
         .defaultSize(width: 1440, height: 900)
         .windowToolbarStyle(.unified(showsTitle: false))
-        .commands { AppCommands() }
+        .commands {
+            AppCommands()
+            UpdateCommands()
+        }
 
         Settings {
             SettingsTabs()
                 .frame(width: 620)
                 .tint(Theme.accent)
         }
+
+        SoftwareUpdateScene()
     }
 }
 
@@ -95,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for window in NSApp.windows { BackgroundMode.prepare(window) }
         }
         SnapshotTool.scheduleIfRequested()
+        UpdateController.shared.scheduleAutomaticCheck()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -129,6 +135,7 @@ struct RootView: View {
         .background(BackgroundWindowConfigurator().frame(width: 0, height: 0))
         .focusedSceneValue(\.windowSession, session)
         .navigationTitle(windowTitle)
+        .presentsSoftwareUpdates()
         .onDisappear { session.disconnect() }
         .task {
             LaunchArguments.consume(into: session, store: store)
@@ -321,6 +328,7 @@ struct SettingsView: View {
                     NSWorkspace.shared.activateFileViewerSelecting([ProfileRepository.defaultDirectory])
                 }
             }
+            UpdateSettingsSections()
         }
         .formStyle(.grouped)
         .padding(.vertical, 8)
