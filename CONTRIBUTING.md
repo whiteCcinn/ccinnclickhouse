@@ -40,7 +40,7 @@ CCINNCLICKHOUSE_PASSWORD=ccinn-pass dist/CcinnClickHouse.app/Contents/MacOS/Ccin
   --connect 127.0.0.1:18101 --user ccinn --database shop --object shop.events --section parts
 ```
 
-Passwords never go on the command line. Other launch arguments: `--https`, `--cluster <name>`, `--read-only`, `--sql "…" --auto-run [--view chart|plan]`, `--operations running|merges|mutations|replication|querylog|storage|dictionaries|cluster`, `--profile <saved name>` and `--snapshot <file.png> --snapshot-delay <seconds> --quit-after-snapshot [--appearance light|dark]`, which renders the window into a PNG without showing it, without a Dock icon and without taking focus.
+Passwords never go on the command line. Other launch arguments: `--https`, `--cluster <name>`, `--read-only`, `--sql "…" --auto-run [--view chart|plan]`, `--operations running|merges|mutations|replication|querylog|storage|dictionaries|cluster`, `--profile <saved name>`, `--duplicate-window` (once connected, opens a second window with the same connection, as ⇧⌘N does) and `--snapshot <file.png> --snapshot-delay <seconds> --quit-after-snapshot [--appearance light|dark]`, which renders the front window into a PNG without showing it, without a Dock icon and without taking focus.
 
 ## Project layout
 

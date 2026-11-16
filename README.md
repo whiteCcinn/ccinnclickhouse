@@ -61,6 +61,7 @@ CcinnClickHouse puts all of that one click away, in a native SwiftUI/AppKit app 
   - **Query-log analysis**: slowest, highest memory, failed, most expensive query patterns, and totals per user over a time window.
   - Disks and storage policies, dictionaries, and the **cluster topology** with Keeper status, macros and `ON CLUSTER` tasks.
 - **Connectivity**
+  - **Multiple windows**, each with its own connection: File ▸ New Window (⌘N), **New Window with This Connection** (⇧⌘N, also the toolbar's New Window button), or **Open in New Window** on a saved connection.
   - HTTP and **HTTPS** (with a private CA, or skip verification for tests), path prefixes for reverse proxies, **chproxy** and load balancers.
   - SSH tunnels through your system OpenSSH (agent, key or password).
   - **Read-only connections enforced by ClickHouse** (`readonly=1`, verified on the real request path when connecting), and optional confirmation before statements that change data or schema.
@@ -126,6 +127,8 @@ Useful shortcuts:
 | **⌃Space** | Show completions |
 | **⌘/** | Comment or uncomment lines |
 | **⌘T** | New query |
+| **⌘N** | New window (another server, or the same one) |
+| **⇧⌘N** | New window with this connection |
 | **⌥⌘1** / **⌥⌘2** | Running queries / query log |
 | **⇧⌘R** | Refresh databases |
 | **⇧⌘D** | Disconnect |
