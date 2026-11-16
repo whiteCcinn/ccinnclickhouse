@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-16
+
 ### Added
 
 - **Check for Updates…** in the app menu. When a newer release exists, CcinnClickHouse shows its version and release notes. **Download & Open** downloads the disk image, verifies its size and SHA-256 against the release's `SHA256SUMS.txt`, saves it to Downloads without overwriting anything, and opens it. **Release Page**, **Skip This Version** and **Later** are also available.
@@ -33,5 +35,6 @@ First public release.
 - History and the MCP audit log redact passwords, keys and tokens in statements and in server error text, and are written with mode 0600 from creation.
 - A running MCP server re-reads AI access on every call, so revoking access in Settings takes effect immediately.
 
-[Unreleased]: https://github.com/whiteCcinn/ccinnclickhouse/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/whiteCcinn/ccinnclickhouse/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/whiteCcinn/ccinnclickhouse/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/whiteCcinn/ccinnclickhouse/releases/tag/v1.0.0
