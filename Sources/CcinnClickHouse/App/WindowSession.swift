@@ -71,6 +71,37 @@ final class WindowSession {
         }
     }
 
+    /// Connects a window opened by a request of this process; `false` when the request carries no handed-off
+    /// connection. Such a request was restored by macOS after a relaunch: the window then behaves exactly like a
+    /// new empty window (connection screen, launch arguments) and never connects by itself.
+    @discardableResult
+    func connect(_ request: WindowRequest, store: ProfileStore) -> Bool {
+        guard let connection = Self.handoff.take(request) else {
+            DebugLog.write("window request without a handoff: empty window")
+            return false
+        }
+        connect(profile: connection.profile, store: store, password: connection.password)
+        return true
+    }
+
+    /// A request for another window connected like this one, with the same profile and the password in use (so
+    /// unsaved connections and passwords not in the Keychain work too). The SSH secret is read from the Keychain on
+    /// every connect, as it is for this window.
+    func duplicateRequest() -> WindowRequest? {
+        guard let workspace else { return nil }
+        return Self.handoff.request(profileID: workspace.profile.id,
+                                    payload: WindowConnection(profile: workspace.profile, password: workspace.client.configuration.password))
+    }
+
+    /// A request for a new window that connects to a saved profile, reading its password from the Keychain as
+    /// Connect does.
+    static func request(opening profile: ConnectionProfile) -> WindowRequest {
+        handoff.request(profileID: profile.id, payload: WindowConnection(profile: profile, password: nil))
+    }
+
+    /// Connections handed to windows this process opens (see `WindowHandoff`).
+    private static let handoff = WindowHandoff<WindowConnection>()
+
     private func updateStatus(name: String, status: String) {
         guard case .connecting = phase else { return }
         phase = .connecting(name: name, status: status)
@@ -90,6 +121,12 @@ final class WindowSession {
         workspace?.shutdown()
         phase = .connections
     }
+}
+
+/// The connection a new window opens: a profile and, when duplicating, the password in use (`nil` = Keychain).
+struct WindowConnection {
+    let profile: ConnectionProfile
+    let password: String?
 }
 
 /// User-facing text for any error.
