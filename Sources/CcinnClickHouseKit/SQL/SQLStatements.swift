@@ -239,8 +239,7 @@ public enum AutoLimit {
         /// Maps a UTF-16 offset in the executed text (e.g. a server error position) back to the text the
         /// user wrote; an offset inside the inserted LIMIT maps to where it was inserted.
         public func originalOffset(ofExecuted offset: Int) -> Int {
-            guard let insertion, offset >= insertion.lowerBound else { return offset }
-            return offset >= insertion.upperBound ? offset - insertion.count : insertion.lowerBound
+            SQLExecutedTextMapping(insertion: insertion).sourceOffset(forExecuted: offset)
         }
     }
 

@@ -31,6 +31,8 @@ let package = Package(
                     swiftSettings: settings),
         .testTarget(name: "IntegrationTests", dependencies: ["ClickHouseWire", "ClickHouseKit", "CcinnClickHouseKit"],
                     swiftSettings: settings),
+        // AppKit behaviour of the app's views (editor text storage, input methods).
+        .testTarget(name: "CcinnClickHouseAppTests", dependencies: ["CcinnClickHouse", "CcinnClickHouseKit"], swiftSettings: settings),
     ],
     swiftLanguageModes: [.v6]
 )

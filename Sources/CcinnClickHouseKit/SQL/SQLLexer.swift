@@ -205,6 +205,10 @@ public struct SQLLexer: Sendable {
 
     /// Nested `/* … /* … */ … */` (ClickHouse follows the SQL standard).
     private func endOfBlockComment(from index: Int) -> Int {
+        scanBlockComment(from: index).end
+    }
+
+    private func scanBlockComment(from index: Int) -> (end: Int, closed: Bool) {
         var index = index + 2
         var depth = 1
         while index < units.count {
@@ -214,15 +218,19 @@ public struct SQLLexer: Sendable {
             } else if units[index] == 0x2A, peek(index + 1) == 0x2F {
                 depth -= 1
                 index += 2
-                if depth == 0 { return index }
+                if depth == 0 { return (index, true) }
             } else {
                 index += 1
             }
         }
-        return units.count
+        return (units.count, false)
     }
 
     private func endOfQuoted(from index: Int, quote: UInt16) -> Int {
+        scanQuoted(from: index, quote: quote).end
+    }
+
+    private func scanQuoted(from index: Int, quote: UInt16) -> (end: Int, closed: Bool) {
         var index = index + 1
         while index < units.count {
             let unit = units[index]
@@ -235,11 +243,44 @@ public struct SQLLexer: Sendable {
                     index += 2
                     continue
                 }
-                return index + 1
+                return (index + 1, true)
             }
             index += 1
         }
-        return units.count
+        return (units.count, false)
+    }
+
+    /// A string, quoted identifier or `/* */` comment that runs to the end of the input without its
+    /// closing delimiter (nested comments count their depth). Only the last token can be unterminated,
+    /// so this rescans at most once. Heredoc strings are always terminated: an opener without its closing
+    /// tag is not lexed as a heredoc (see `unterminatedHeredocOpener(at:)`).
+    public func isUnterminated(_ token: SQLToken) -> Bool {
+        let start = token.range.lowerBound
+        guard token.range.upperBound >= units.count, start >= 0, start < units.count else { return false }
+        switch token.kind {
+        case .string, .quotedIdentifier:
+            guard units[start] != 0x24 else { return false } // `$tag$…$tag$`
+            return !scanQuoted(from: start, quote: units[start]).closed
+        case .comment:
+            guard units[start] == 0x2F else { return false } // `--` and `#` comments end at the line end
+            return !scanBlockComment(from: start).closed
+        default:
+            return false
+        }
+    }
+
+    /// The opener (`$$` or `$tag$`, a tag of word characters) of a heredoc that is never closed, when
+    /// one starts at `index`. ClickHouse then lexes `$` and bare words instead of a string, so the rest
+    /// of the text is not what the user meant. Other `$` uses (`$1 + $2`) are not heredocs.
+    public func unterminatedHeredocOpener(at index: Int) -> Range<Int>? {
+        guard index >= 0, index < units.count, units[index] == 0x24 else { return nil }
+        var tagEnd = index + 1
+        while tagEnd < units.count, units[tagEnd] != 0x24 {
+            guard Self.isWordChar(units[tagEnd]), tagEnd - index <= 64 else { return nil }
+            tagEnd += 1
+        }
+        guard tagEnd < units.count, heredocEnd(from: index) == nil else { return nil }
+        return index..<(tagEnd + 1)
     }
 
     /// End (exclusive) of a heredoc starting at `index` (`$`): the tag is everything up to the next `$`
