@@ -120,16 +120,20 @@ struct CompletionTests {
         #expect(parts == ["group", "Uniq", "Array"])
     }
 
-    @Test func fuzzNeverTraps() {
-        var generator = SplitMix64(seed: 5)
-        let alphabet = Array("SELECT FROM e. sumI SET x=1, '\"`$({:;) WHERE ON CLUSTER ENGINE FORMAT ::".unicodeScalars)
-        for _ in 0..<2_000 {
-            var text = ""
-            for _ in 0..<Int(generator.next() % 50) { text.unicodeScalars.append(alphabet[Int(generator.next() % UInt64(alphabet.count))]) }
-            let cursor = text.utf16.isEmpty ? 0 : Int(generator.next() % UInt64(text.utf16.count + 1))
-            _ = CompletionEngine.complete(text: text, cursor: cursor, schema: Self.schema)
-            _ = CompletionEngine.complete(text: text, cursor: -5, schema: Self.schema)
-            _ = CompletionEngine.complete(text: text, cursor: 10_000, schema: Self.schema)
+    @Test func fuzzNeverTraps() async {
+        let rounds: Int = await onDedicatedThread {
+            var generator = SplitMix64(seed: 5)
+            let alphabet = Array("SELECT FROM e. sumI SET x=1, '\"`$({:;) WHERE ON CLUSTER ENGINE FORMAT ::".unicodeScalars)
+            for _ in 0..<2_000 {
+                var text = ""
+                for _ in 0..<Int(generator.next() % 50) { text.unicodeScalars.append(alphabet[Int(generator.next() % UInt64(alphabet.count))]) }
+                let cursor = text.utf16.isEmpty ? 0 : Int(generator.next() % UInt64(text.utf16.count + 1))
+                _ = CompletionEngine.complete(text: text, cursor: cursor, schema: Self.schema)
+                _ = CompletionEngine.complete(text: text, cursor: -5, schema: Self.schema)
+                _ = CompletionEngine.complete(text: text, cursor: 10_000, schema: Self.schema)
+            }
+            return 2_000
         }
+        #expect(rounds == 2_000)
     }
 }

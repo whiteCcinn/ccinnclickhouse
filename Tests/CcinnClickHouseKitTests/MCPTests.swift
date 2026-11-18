@@ -475,8 +475,8 @@ struct MCPRevocationTests {
         let started = ContinuousClock.now
         call.cancel()
         await #expect(throws: ClickHouseError.self) { _ = try await call.value }
-        // Well under the 30 s open. Generous bound: CI scheduling adds seconds of delay.
-        #expect(ContinuousClock.now - started < .seconds(10), "the cancelled call returned without waiting for the open")
+        // Below the 30 s open whose absence it proves; generous, because CI scheduling adds seconds.
+        #expect(ContinuousClock.now - started < .seconds(25), "the cancelled call returned without waiting for the open")
         #expect(log.lock.withLock { $0.opened }.isEmpty)
     }
 
@@ -505,7 +505,9 @@ struct MCPRevocationTests {
     }
 }
 
-func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async -> Bool {
+/// The timeout only bounds a failure: a passing condition returns at once. Generous, because a busy CI runner delays
+/// scheduling by seconds.
+func eventually(timeout: Duration = .seconds(10), _ condition: () -> Bool) async -> Bool {
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
         if condition() { return true }

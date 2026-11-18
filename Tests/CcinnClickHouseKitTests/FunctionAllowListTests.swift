@@ -108,14 +108,16 @@ struct FunctionAllowListTests {
     }
 
     /// Linear in the statement: deeply nested calls and long APPLY chains.
-    @Test func pathologicalStatementsStayFast() {
+    @Test func pathologicalStatementsStayFast() async {
         let nested = "SELECT " + String(repeating: "arrayMap(x -> x, ", count: 2_000) + "[1]" + String(repeating: ")", count: 2_000)
         let chain = "SELECT * " + String(repeating: "APPLY(length) ", count: 5_000) + "FROM shop.t"
-        let clock = ContinuousClock()
-        let elapsed = clock.measure {
-            _ = ReadOnlySQLGuard.check(nested, audience: ai)
-            _ = ReadOnlySQLGuard.check(chain, audience: ai)
+        // CPU time on a thread of its own: a loaded machine does not inflate it.
+        let cost: Duration = await onDedicatedThread {
+            let started = SQLFormatterTests.threadCPUTime()
+            _ = ReadOnlySQLGuard.check(nested, audience: .ai(database: "shop"))
+            _ = ReadOnlySQLGuard.check(chain, audience: .ai(database: "shop"))
+            return SQLFormatterTests.threadCPUTime() - started
         }
-        #expect(elapsed < .seconds(5), "\(elapsed)")
+        #expect(cost < .seconds(5), "\(cost)")
     }
 }

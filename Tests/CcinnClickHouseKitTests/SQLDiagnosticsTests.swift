@@ -704,7 +704,7 @@ struct TextPositionTests {
 
 @Suite("Diagnostics robustness")
 struct DiagnosticsFuzzTests {
-    @Test func randomInputNeverCrashes() {
+    @Test func randomInputNeverCrashes() async {
         let alphabet = Array("select from 'x' \"y\" `z` -- # #! /* */ ; . , ( ) [ ] { } $$ $t$ {p:UInt8} 0x1F 1e9 吉 🇲🇾 é \\ \n")
         let messages = [Recorded.formT, Recorded.endOfQuery, Recorded.multiLine, Recorded.qualified, Recorded.tableOld, Recorded.function,
                         "Syntax error: failed at position 9999 ('x'): x.", "Syntax error: failed at position 3 ('x') (line 2, col 9999): x.",
@@ -712,34 +712,40 @@ struct DiagnosticsFuzzTests {
         // The messages do not depend on the text: parse them once (the locator is what meets random text).
         let errors = messages.map { SQLServerError.parse($0) }
         let positions = (1...120).map { SQLServerError.parse("Syntax error: failed at position \($0) ('x'): x.") }
-        var generator = SystemRandomNumberGenerator()
-        for _ in 0..<2_000 {
-            let text = String((0..<Int.random(in: 0...80, using: &generator)).compactMap { _ in alphabet.randomElement(using: &generator) })
-            let length = text.utf16.count
-            let diagnostics = SQLLinter.diagnose(text)
-            for diagnostic in diagnostics {
-                #expect(diagnostic.range.lowerBound >= 0 && diagnostic.range.upperBound <= length)
-                #expect(diagnostic.scope.lowerBound <= diagnostic.range.lowerBound && diagnostic.range.upperBound <= diagnostic.scope.upperBound)
-            }
-            for error in errors {
-                if let range = SQLErrorLocator.range(in: text, error: error) {
-                    #expect(range.lowerBound >= 0 && range.upperBound <= length && !range.isEmpty)
+        // On a thread of its own; the violations come back to be reported here.
+        let violations: [String] = await onDedicatedThread {
+            var violations: [String] = []
+            var generator = SystemRandomNumberGenerator()
+            for _ in 0..<2_000 {
+                let text = String((0..<Int.random(in: 0...80, using: &generator)).compactMap { _ in alphabet.randomElement(using: &generator) })
+                let length = text.utf16.count
+                let diagnostics = SQLLinter.diagnose(text)
+                for diagnostic in diagnostics {
+                    if !(diagnostic.range.lowerBound >= 0 && diagnostic.range.upperBound <= length) { violations.append(text.debugDescription) }
+                    if !(diagnostic.scope.lowerBound <= diagnostic.range.lowerBound && diagnostic.range.upperBound <= diagnostic.scope.upperBound) { violations.append(text.debugDescription) }
                 }
+                for error in errors {
+                    if let range = SQLErrorLocator.range(in: text, error: error) {
+                        if !(range.lowerBound >= 0 && range.upperBound <= length && !range.isEmpty) { violations.append(text.debugDescription) }
+                    }
+                }
+                let prefix = "EXPLAIN PLAN "
+                let mapping = SQLExecutedTextMapping(prefixLength: prefix.utf16.count)
+                if let error = positions.randomElement(using: &generator),
+                   let range = SQLErrorLocator.range(in: text, executed: prefix + text, mapping: mapping, error: error) {
+                    if !(range.lowerBound >= 0 && range.upperBound <= length && !range.isEmpty) { violations.append(text.debugDescription) }
+                }
+                let start = Int.random(in: 0...length, using: &generator)
+                let end = Int.random(in: start...length, using: &generator)
+                let edit = SQLTextEdit(range: start..<end, replacementLength: Int.random(in: 0...5, using: &generator),
+                                       separatorBeforeEnd: Bool.random(using: &generator), separatorAtStart: Bool.random(using: &generator))
+                for diagnostic in SQLDiagnosticTracker.apply([edit], to: diagnostics) {
+                    if !(diagnostic.range.lowerBound >= 0) { violations.append(text.debugDescription) }
+                }
+                _ = SQLTextPosition.lineAndColumn(of: Int.random(in: -2...(length + 2), using: &generator), in: text)
             }
-            let prefix = "EXPLAIN PLAN "
-            let mapping = SQLExecutedTextMapping(prefixLength: prefix.utf16.count)
-            if let error = positions.randomElement(using: &generator),
-               let range = SQLErrorLocator.range(in: text, executed: prefix + text, mapping: mapping, error: error) {
-                #expect(range.lowerBound >= 0 && range.upperBound <= length && !range.isEmpty)
-            }
-            let start = Int.random(in: 0...length, using: &generator)
-            let end = Int.random(in: start...length, using: &generator)
-            let edit = SQLTextEdit(range: start..<end, replacementLength: Int.random(in: 0...5, using: &generator),
-                                   separatorBeforeEnd: Bool.random(using: &generator), separatorAtStart: Bool.random(using: &generator))
-            for diagnostic in SQLDiagnosticTracker.apply([edit], to: diagnostics) {
-                #expect(diagnostic.range.lowerBound >= 0)
-            }
-            _ = SQLTextPosition.lineAndColumn(of: Int.random(in: -2...(length + 2), using: &generator), in: text)
+            return violations
         }
+        #expect(violations.isEmpty, "\(violations.prefix(5))")
     }
 }

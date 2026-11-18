@@ -225,7 +225,8 @@ struct SQLFormatRunnerTests {
                         whileRunning: () -> Void = {}, direct: @escaping SQLFormatRunner.DirectReplace = { _, _, _, _ in false }) async throws {
         runner.format(options: options, fallback: fallback, replaceWithoutEditor: direct)
         whileRunning()
-        let deadline = ContinuousClock.now + .seconds(10)
+        // Bounds only a hang: a busy CI runner delays the formatting task by seconds.
+        let deadline = ContinuousClock.now + .seconds(25)
         while runner.isRunning, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         #expect(!runner.isRunning)
     }

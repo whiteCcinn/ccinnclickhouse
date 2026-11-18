@@ -479,28 +479,35 @@ struct SQLFormatterTests {
 
     /// The safety property: the formatted text has the same tokens; with the default options their text is
     /// identical, otherwise only the case of keyword tokens may differ. Review #8: `:` runs and adjacency included.
-    @Test func randomInputKeepsItsTokens() {
+    @Test func randomInputKeepsItsTokens() async {
         let pieces = ["select", "from", "where", "and", "or", "between", "case", "when", "then", "end", "in", "not", "is", "null",
                       "global", "any", "left", "join", "on", "array", "final", "sample", "format", "settings", "insert", "into",
                       "values", "with", "totals", "limit", "by", "key", "table", "over", "rows", "desc", "interval", "day",
                       "(", ")", "[", "]", "{", "}", ",", ";", ".", ":", "::", ":::", "?", "->", "-", "+", "*", "=", "'x y'", "`a b`",
                       "\"q\"", "$$h  d$$", "{p:UInt8}", "-- c\n", "# h\n", "/* d */", "1", "2.5", "0x1F", "1e3", "a", "b", "t",
                       "$", "#", "x'41'", "\n", " ", "  "]
-        var generator = SystemRandomNumberGenerator()
-        var refused = 0
-        for round in 0..<3_000 {
-            let count = Int.random(in: 0...40, using: &generator)
-            let text = (0..<count).map { _ in pieces.randomElement(using: &generator) ?? " " }
-                .joined(separator: Bool.random(using: &generator) ? " " : "")
-            let options = [SQLFormatOptions(), upper, SQLFormatOptions(keywordCase: .lower, indentWidth: 4)][round % 3]
-            guard let formatted = SQLFormatter.format(text, options: options) else { // refused: never wrong, at worst unhelpful
-                refused += 1
-                continue
+        // On a thread of its own; the failures come back to be reported here.
+        let (refused, failures): (Int, [String]) = await onDedicatedThread {
+            var generator = SystemRandomNumberGenerator()
+            var refused = 0
+            var failures: [String] = []
+            for round in 0..<3_000 {
+                let count = Int.random(in: 0...40, using: &generator)
+                let text = (0..<count).map { _ in pieces.randomElement(using: &generator) ?? " " }
+                    .joined(separator: Bool.random(using: &generator) ? " " : "")
+                let options = [SQLFormatOptions(), SQLFormatOptions(keywordCase: .upper), SQLFormatOptions(keywordCase: .lower, indentWidth: 4)][round % 3]
+                guard let formatted = SQLFormatter.format(text, options: options) else { // refused: never wrong, at worst unhelpful
+                    refused += 1
+                    continue
+                }
+                if !Self.sameTokens(text, formatted, caseMayDiffer: options.keywordCase != .preserve) {
+                    failures.append("\(text.debugDescription) -> \(formatted.debugDescription)")
+                }
+                if SQLFormatter.format(formatted, options: options) != formatted { failures.append("not idempotent: \(text.debugDescription)") }
             }
-            #expect(Self.sameTokens(text, formatted, caseMayDiffer: options.keywordCase != .preserve),
-                    "\(text.debugDescription) -> \(formatted.debugDescription)")
-            #expect(SQLFormatter.format(formatted, options: options) == formatted, "not idempotent: \(text.debugDescription)")
+            return (refused, failures)
         }
+        #expect(failures.isEmpty, "\(failures.prefix(5))")
         #expect(refused < 30, "the formatter should almost never have to refuse (\(refused) of 3000)")
     }
 
@@ -847,7 +854,7 @@ struct SQLFormatterTests {
     }
 
     /// Final review: time stays linear on pathological nesting (precomputed matching, no forward rescans).
-    @Test func pathologicalInputStaysLinear() {
+    @Test func pathologicalInputStaysLinear() async {
         let inputs: [(String, String)] = [
             ("select ( × 50k", String(repeating: "select (", count: 50_000)),
             ("(with x as ( × 20k", String(repeating: "(with x as (", count: 20_000)),
@@ -860,11 +867,18 @@ struct SQLFormatterTests {
             ("UNION ALL ( × 20k", String(repeating: "select 1 union all (", count: 20_000)),
             ("( × 50k )", String(repeating: "(", count: 50_000) + String(repeating: ")", count: 50_000)),
         ]
-        for (label, sql) in inputs {
-            let started = Self.threadCPUTime()
-            _ = SQLFormatter.format(sql)
-            // Linear work takes well under a second here; the quadratic look-aheads this replaced took minutes.
-            #expect(Self.threadCPUTime() - started < .seconds(5), "\(label): debug-build bound")
+        // On a thread of its own (CPU time measured there), so the cooperative pool stays free for other tests.
+        let costs: [(String, Duration)] = await onDedicatedThread {
+            inputs.map { input in
+                let started = Self.threadCPUTime()
+                _ = SQLFormatter.format(input.1)
+                return (input.0, Self.threadCPUTime() - started)
+            }
+        }
+        for (label, cost) in costs {
+            // Linear work takes a few seconds of CPU at most in a debug build (12 s for nested CASE × 20k on the 3-core CI
+            // runner, about 4× slower than a developer Mac); the quadratic look-aheads this replaced took minutes.
+            #expect(cost < .seconds(45), "\(label): debug-build bound")
         }
     }
 
@@ -874,14 +888,18 @@ struct SQLFormatterTests {
         .nanoseconds(Int64(clamping: clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)))
     }
 
-    @Test func aMegabyteScriptFormatsQuickly() throws {
+    @Test func aMegabyteScriptFormatsQuickly() async throws {
         let statement = "select o.id, sum(o.total) total, case when o.x > 1 then 'a' when o.x < 0 then 'b' else 'c' end k "
             + "from shop.orders o global left join shop.customers c on o.cid = c.id and c.city in ('KL', 'PG') "
             + "prewhere o.d between '2024-01-01' and '2024-12-31' where o.status = 'paid' group by o.id, k order by total desc limit 10;\n"
         let script = String(repeating: statement, count: 1_048_576 / statement.utf8.count + 1)
-        let started = Self.threadCPUTime()
-        let formatted = try #require(format(script, upper))
-        #expect(Self.threadCPUTime() - started < .seconds(20), "debug build bound; release is far faster")
+        let (result, cost): (String?, Duration) = await onDedicatedThread {
+            let started = Self.threadCPUTime()
+            let formatted = SQLFormatter.format(script, options: SQLFormatOptions(keywordCase: .upper))
+            return (formatted, Self.threadCPUTime() - started)
+        }
+        let formatted = try #require(result)
+        #expect(cost < .seconds(20), "debug build bound; release is far faster")
         #expect(formatted.count > script.count)
     }
 

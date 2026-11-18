@@ -10,7 +10,9 @@ func configuration(port: Int, readOnly: Bool = false) -> ConnectionConfiguration
 }
 
 /// Waits (bounded) until `condition` holds.
-func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async -> Bool {
+/// The timeout only bounds a failure: a passing condition returns at once. Generous, because a busy CI runner delays
+/// scheduling by seconds.
+func eventually(timeout: Duration = .seconds(10), _ condition: () -> Bool) async -> Bool {
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
         if condition() { return true }
@@ -297,8 +299,8 @@ struct ClientTests {
         } catch let error as ClickHouseError {
             #expect(error.kind == .cancelled)
         }
-        // Well under the 30 s response delay. Generous bound: CI scheduling adds seconds of delay.
-        #expect(ContinuousClock.now - started < .seconds(10))
+        // Below the 30 s response delay whose absence it proves; generous, because CI scheduling adds seconds.
+        #expect(ContinuousClock.now - started < .seconds(25))
         let killed = await eventually { !server.requests(containing: "KILL QUERY WHERE query_id = 'ccinnch-sql-cancel-me'").isEmpty }
         #expect(killed)
     }
@@ -746,7 +748,7 @@ struct TransportEarlyCompletionTests {
             defer { finished.withLock { $0 = true } }
             _ = try await delegate.start(task)
         }
-        let returned = await eventually(timeout: .seconds(2)) { finished.withLock { $0 } }
+        let returned = await eventually { finished.withLock { $0 } }
         #expect(returned, "start() returned")
         if returned { await #expect(throws: ClickHouseError.self) { try await start.value } }
     }

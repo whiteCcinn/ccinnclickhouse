@@ -56,24 +56,29 @@ struct LexerTests {
         }
     }
 
-    @Test func fuzzNeverTraps() {
-        var generator = SplitMix64(seed: 99)
-        let alphabet = Array("SELECT'\"`$#/*-{}:;()[]\\0x1e.ab \n中😀".unicodeScalars)
-        for _ in 0..<5_000 {
-            var text = ""
-            for _ in 0..<Int(generator.next() % 60) { text.unicodeScalars.append(alphabet[Int(generator.next() % UInt64(alphabet.count))]) }
-            let lexer = SQLLexer(text)
-            for token in lexer.tokens() {
-                #expect(token.range.lowerBound >= 0 && token.range.upperBound <= lexer.units.count)
-                _ = lexer.identifierValue(of: token)
-                _ = lexer.stringValue(of: token)
+    @Test func fuzzNeverTraps() async {
+        let outOfRange: [String] = await onDedicatedThread {
+            var generator = SplitMix64(seed: 99)
+            let alphabet = Array("SELECT'\"`$#/*-{}:;()[]\\0x1e.ab \n中😀".unicodeScalars)
+            var outOfRange: [String] = []
+            for _ in 0..<5_000 {
+                var text = ""
+                for _ in 0..<Int(generator.next() % 60) { text.unicodeScalars.append(alphabet[Int(generator.next() % UInt64(alphabet.count))]) }
+                let lexer = SQLLexer(text)
+                for token in lexer.tokens() {
+                    if token.range.lowerBound < 0 || token.range.upperBound > lexer.units.count { outOfRange.append(text.debugDescription) }
+                    _ = lexer.identifierValue(of: token)
+                    _ = lexer.stringValue(of: token)
+                }
+                _ = SQLStatementSplitter.split(text)
+                _ = SQLStatementKind.of(text)
+                _ = AutoLimit.apply(to: text, limit: 100)
+                _ = ReadOnlySQLGuard.check(text)
+                _ = SQLRedactor.redact(text)
             }
-            _ = SQLStatementSplitter.split(text)
-            _ = SQLStatementKind.of(text)
-            _ = AutoLimit.apply(to: text, limit: 100)
-            _ = ReadOnlySQLGuard.check(text)
-            _ = SQLRedactor.redact(text)
+            return outOfRange
         }
+        #expect(outOfRange.isEmpty, "\(outOfRange.prefix(5))")
     }
 }
 
@@ -514,13 +519,17 @@ struct GuardedWireTextTests {
     }
 
     /// The refused letters are exactly those Unicode maps (upper, lower or title case) to text with an ASCII letter: 19.
-    @Test func asciiFoldingLettersAreDerivedFromUnicode() {
-        var derived: Set<Unicode.Scalar> = []
-        for value in UInt32(0x80)...0x10FFFF {
-            // A mapping that holds an ASCII letter differs from the letter itself: only case-changing scalars are mapped.
-            guard let scalar = Unicode.Scalar(value), scalar.properties.changesWhenCaseMapped else { continue }
-            let mappings = [scalar.properties.uppercaseMapping, scalar.properties.lowercaseMapping, scalar.properties.titlecaseMapping]
-            if mappings.contains(where: { $0.unicodeScalars.contains { $0.isASCII && $0.properties.isAlphabetic } }) { derived.insert(scalar) }
+    @Test func asciiFoldingLettersAreDerivedFromUnicode() async {
+        // Every scalar, on a thread of its own.
+        let derived: Set<Unicode.Scalar> = await onDedicatedThread {
+            var derived: Set<Unicode.Scalar> = []
+            for value in UInt32(0x80)...0x10FFFF {
+                // A mapping that holds an ASCII letter differs from the letter itself: only case-changing scalars are mapped.
+                guard let scalar = Unicode.Scalar(value), scalar.properties.changesWhenCaseMapped else { continue }
+                let mappings = [scalar.properties.uppercaseMapping, scalar.properties.lowercaseMapping, scalar.properties.titlecaseMapping]
+                if mappings.contains(where: { $0.unicodeScalars.contains { $0.isASCII && $0.properties.isAlphabetic } }) { derived.insert(scalar) }
+            }
+            return derived
         }
         #expect(derived == ReadOnlySQLGuard.asciiFoldingLetters)
         #expect(String(String.UnicodeScalarView(ReadOnlySQLGuard.asciiFoldingLetters.sorted { $0.value < $1.value })) == "ßİıŉſǰẖẗẘẙẚKﬀﬁﬂﬃﬄﬅﬆ")
@@ -995,16 +1004,19 @@ struct LexerParityTests {
 
     /// Review #6: `$0 + $1 + …` (no tag ever closes) is linear: 1.2.0 took 8.8 s at 349 KB, rescanning to the end from
     /// every `$`, and froze highlighting on every keystroke.
-    @Test func manyUnclosedDollarsStayLinear() {
+    @Test func manyUnclosedDollarsStayLinear() async {
         let text = "select " + (0..<40_000).map { "$\($0)" }.joined(separator: " + ")
         #expect(text.utf16.count > 300_000)
-        let started = SQLFormatterTests.threadCPUTime()
-        let tokens = SQLLexer.tokenize(text)
-        _ = SQLLinter.diagnose(text)
-        _ = SQLStatementSplitter.split(text)
-        _ = ReadOnlySQLGuard.check(text)
-        #expect(SQLFormatterTests.threadCPUTime() - started < .seconds(5), "debug-build bound")
-        #expect(tokens.count > 79_000)
+        let (tokenCount, cost): (Int, Duration) = await onDedicatedThread {
+            let started = SQLFormatterTests.threadCPUTime()
+            let tokens = SQLLexer.tokenize(text)
+            _ = SQLLinter.diagnose(text)
+            _ = SQLStatementSplitter.split(text)
+            _ = ReadOnlySQLGuard.check(text)
+            return (tokens.count, SQLFormatterTests.threadCPUTime() - started)
+        }
+        #expect(cost < .seconds(5), "debug-build bound")
+        #expect(tokenCount > 79_000)
     }
 
     /// Tokens whose range a supported server could read differently: the read-only guard refuses them.
