@@ -51,7 +51,13 @@ CcinnClickHouse puts all of that one click away, in a native SwiftUI/AppKit app 
 - **SQL workbench**
   - Highlighting that understands ClickHouse (nested comments, heredocs, `{name:Type}` parameters).
   - Completion fed by the server: **functions with aggregate combinators** (`sumIf`, `uniqMerge`, `avgOrNullIf`), **settings** after `SET` / `SETTINGS` with their descriptions, formats, engines, table functions, data types, clusters, plus databases, tables, columns through aliases and CTEs.
-  - Automatic `LIMIT` that knows `LIMIT … BY`, `SETTINGS` and `FORMAT`; **live progress** (rows and bytes read) while a query runs; **real cancellation**; errors underlined at their exact position.
+  - Automatic `LIMIT` that knows `LIMIT … BY`, `SETTINGS` and `FORMAT`; **live progress** (rows and bytes read) while a query runs; **real cancellation**.
+  - **Precise errors.** The token ClickHouse rejected is underlined, with a short message after the line: `Syntax error near 't'. Expected one of: …` instead of 60 alternatives and the echoed query; `Maybe you meant` suggestions are kept. Unknown columns, tables, databases, functions and settings are found by name even when the server gives no position, with either analyzer. The marker follows your edits and disappears once you change the failing statement.
+  - Unclosed quotes, comments, `$$` heredocs and brackets are flagged as you type.
+  - **Format SQL** (⌥⌘L) lays out the selection, or the whole script, as one undoable edit: clauses on their own lines, one item per line, `AND`/`OR` conditions, indented subqueries and CTEs, split `CASE`.
+    - Keyword case stays as written unless you choose UPPER or lower in Settings, and even then only words that can be nothing but a keyword where they stand change, because ClickHouse names and functions are case-sensitive.
+    - Strings, heredocs, comments and `INSERT` data keep their bytes.
+    - The result is checked against the original first. When it cannot be proven to mean the same, for example `1_000`, which ClickHouse 22.8 reads as a name, the text is left alone and the status line says why.
   - `EXPLAIN` plan, plan with **indexes** or actions, **pipeline**, **estimate**, AST and syntax.
   - History, CSV / TSV / `INSERT` export (binary values keep their bytes).
 - **Charts from any query.** A time column with numbers becomes a line chart, categories become bars, two numbers a scatter plot; switch between bar, line, area, scatter and pie, pick axes, series and aggregation. Large results are reduced to at most 2,000 points, off the main thread.
@@ -61,9 +67,9 @@ CcinnClickHouse puts all of that one click away, in a native SwiftUI/AppKit app 
   - **Query-log analysis**: slowest, highest memory, failed, most expensive query patterns, and totals per user over a time window.
   - Disks and storage policies, dictionaries, and the **cluster topology** with Keeper status, macros and `ON CLUSTER` tasks.
 - **Connectivity**
-  - **Multiple windows**, each with its own connection: File ▸ New Window (⌘N), **New Window with This Connection** (⇧⌘N, also the toolbar's New Window button), or **Open in New Window** on a saved connection.
+  - **Multiple windows**, each with its own connection: File ▸ **New CcinnClickHouse Window** (⌘N), **New Window with This Connection** (⇧⌘N, also the toolbar's New Window button), or **Open in New Window** on a saved connection.
   - HTTP and **HTTPS** (with a private CA, or skip verification for tests), path prefixes for reverse proxies, **chproxy** and load balancers.
-  - SSH tunnels through your system OpenSSH (agent, key or password).
+  - SSH tunnels through your system OpenSSH (agent, key or password). A tunnel never joins or becomes a shared `ControlMaster` connection.
   - **Read-only connections enforced by ClickHouse** (`readonly=1`, verified on the real request path when connecting), and optional confirmation before statements that change data or schema.
 - **AI access through MCP.** A built-in Model Context Protocol server lets Claude Code, Codex and Claude Desktop explore and query the connections you opt in, read-only by default. See [MCP server](#mcp-server-let-ai-query-clickhouse).
 - **Secure by default.** Passwords live in the macOS Keychain; nothing is collected or sent anywhere unless you enable AI access.
@@ -126,8 +132,9 @@ Useful shortcuts:
 | **⌘.** | Cancel the running statement |
 | **⌃Space** | Show completions |
 | **⌘/** | Comment or uncomment lines |
+| **⌥⌘L** | Format SQL (the selection, or the whole script) |
 | **⌘T** | New query |
-| **⌘N** | New window (another server, or the same one) |
+| **⌘N** | New CcinnClickHouse Window (another server, or the same one) |
 | **⇧⌘N** | New window with this connection |
 | **⌥⌘1** / **⌥⌘2** | Running queries / query log |
 | **⇧⌘R** | Refresh databases |
@@ -175,7 +182,15 @@ CcinnClickHouse has a built-in **Model Context Protocol** server. AI assistants 
 
 - Passwords stay in the Keychain and are never shown to the AI.
 - Only connections you enabled are visible.
-- `run_query` accepts a single read-only statement (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXISTS`, `EXPLAIN`). The app checks this with its own SQL lexer and also refuses functions that reach outside ClickHouse (`url`, `file`, `s3`, `remote`, `mysql`, `executable`, …), table functions outside a small allow-list and per-query `SETTINGS`.
+- `run_query` accepts a single read-only statement (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXISTS`, `EXPLAIN`). The app checks this with its own SQL lexer and also refuses functions that reach outside ClickHouse (`url`, `file`, `s3`, `remote`, `mysql`, `executable`, …), table functions outside a small allow-list, per-query `SETTINGS` and quoted names with escape sequences (ClickHouse decodes `` `\x66ile` `` as `file`).
+- The check runs on the exact text sent, with the automatic `LIMIT` already added.
+- AI access reads `system` only through an allow-list of schema and diagnostic tables (`tables`, `columns`, `parts`, `merges`, `replicas`, `settings` …). Other sessions' SQL text and credentials (`query_log`, `processes`, `mutations`, `users`, `named_collections` …) never reach it directly. The running-queries, query-log and mutation tools show other sessions' SQL only as digests, with every string, number and quoted value replaced by `?` (bare words stay). Table functions are allow-listed too (generators and inline data; no `merge`, `loop` or `cluster`).
+- AI access never receives object definitions, on any version: 22.8 prints credentials in them, and 24.8 still prints the ones inside URLs. The definition columns (`create_table_query`, `engine_full`, `as_select`, `create_query`, `view_definition`, `system.projections.query`) are refused however they are written, as are `SHOW CREATE` (also `SHOW TABLE` / `SHOW VIEW`), `SHOW FUNCTIONS`, `EXPLAIN SYNTAX` (which inlines view queries) and `*` other than `count(*)` over `system.tables`, `system.databases`, `system.functions` or `information_schema`. `describe_table` returns columns, keys and the engine name. Plans come back with quoted strings shown as `'?'`, results come in the tool's own format (no `FORMAT` clause), and credentials (URL passwords, values of credential-named keys) are masked in everything the tools return. A result says how many values it masked (`"masked": N`); other data is never altered.
+- Views or dictionaries that an administrator builds over system tables are invisible to the guard: AI access reads them like any other table. Grant the AI user `SELECT` only on what it may see.
+- Scalar `file()` needs no FILE grant on 22.8 and 24.8 (it reads files under `user_files` for any user); there the app's guard is what stops it. 26.8 requires `READ ON FILE`.
+- AI queries call only reviewed functions: those ClickHouse 22.8, 24.8 and 26.8 ship, minus the ones that reach outside ClickHouse (`file`, `ai*` LLM functions, `catboostEvaluate` …), read objects by name or change state. This covers every way a query names a function: calls anywhere in the statement, `APPLY`, a bare function name passed to a higher-order function, and the aggregate named in `arrayReduce('…')`. A newer server's new functions are refused until a CcinnClickHouse update reviews them. `dictGet` is allowed by design; it reads dictionaries whose sources an administrator defines.
+- A settings profile can change how ClickHouse parses statements (`dialect`, `polyglot_dialect`, `implicit_select`, `enable_json_ast_dialect`) or give a query without `FROM` a table (`implicit_table_at_top_level`). Read-only requests send the safe values of these settings, and every read-only path (connecting, each AI tool call, each editor batch) checks the effective values first. A profile whose `readonly = 1` blocks the override is refused.
+- **Only for a user with `SELECT` grants.** Before every call, read-only AI tools check the ClickHouse user's grants (`SHOW GRANTS`) and the effective `readonly` level. A user holding `SOURCES` (`file()`, `url()`, `remote()` …), `SYSTEM`, access management or `ALL` is refused, because `readonly=1` stops none of those. A connection can allow such a user explicitly, but this is not recommended.
 - **ClickHouse enforces it too**: every request of a read-only connection carries `readonly=1`, and the connection checks `getSetting('readonly')` on the actual request path before it is used. Proxies such as **chproxy drop `readonly`**; read-only access through them is refused unless the ClickHouse user behind the proxy has a read-only settings profile (map the proxy user to such a user).
 - Changing a connection's AI access in Settings applies to a running MCP server immediately.
 - Each tool call is a separate stateless request: a `SET`, `USE` or temporary table never carries into the next call.
