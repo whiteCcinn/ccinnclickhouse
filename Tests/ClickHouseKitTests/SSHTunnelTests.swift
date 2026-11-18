@@ -23,6 +23,24 @@ struct SSHTunnelTests {
         #expect(arguments.last == "bastion")
     }
 
+    /// With `ControlMaster auto` in ~/.ssh/config, the tunnel must neither become the shared master (closing the window
+    /// would cut the user's other sessions) nor attach to the user's master as a client (that master would then own the
+    /// forwarded port, which stays open after the tunnel is killed and bypasses the profile's authentication). Both
+    /// options are needed: `ControlMaster=no` still lets ssh use an existing master through the configured ControlPath.
+    @Test(arguments: SSHTunnelConfiguration.Authentication.allCases)
+    func tunnelsNeverUseOrBecomeASharedControlMaster(authentication: SSHTunnelConfiguration.Authentication) throws {
+        let configuration = SSHTunnelConfiguration(host: "bastion", username: "ops", authentication: authentication,
+                                                   privateKeyPath: authentication == .privateKey ? "~/.ssh/id_ed25519" : nil)
+        let arguments = try SSHTunnel.arguments(for: configuration, localPort: 40_000, remote: remote)
+        let options = zip(arguments, arguments.dropFirst()).filter { $0.0 == "-o" }.map(\.1)
+        let control = options.filter { $0.lowercased().hasPrefix("control") }
+        #expect(control.filter { $0.lowercased().hasPrefix("controlmaster") } == ["ControlMaster=no"])
+        #expect(control.filter { $0.lowercased().hasPrefix("controlpath") } == ["ControlPath=none"], "no other ControlPath")
+        #expect(!control.contains { $0.lowercased().hasPrefix("controlpersist") })
+        #expect(!arguments.contains("-M") && !arguments.contains("-S"), "no master mode, no control socket")
+        #expect(arguments.last == "ops@bastion", "the destination stays last")
+    }
+
     @Test func optionInjectionIsRejected() {
         #expect(throws: ClickHouseError.self) {
             try SSHTunnel.arguments(for: SSHTunnelConfiguration(host: "-oProxyCommand=evil", username: "u", authentication: .agent), localPort: 1, remote: remote)
