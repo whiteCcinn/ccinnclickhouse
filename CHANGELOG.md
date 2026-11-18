@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-18
+
 ### Added
 
 - **Precise SQL error markers.**
@@ -112,7 +114,8 @@ First public release.
 - History and the MCP audit log redact passwords, keys and tokens in statements and in server error text, and are written with mode 0600 from creation.
 - A running MCP server re-reads AI access on every call, so revoking access in Settings takes effect immediately.
 
-[Unreleased]: https://github.com/whiteCcinn/ccinnclickhouse/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/whiteCcinn/ccinnclickhouse/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/whiteCcinn/ccinnclickhouse/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/whiteCcinn/ccinnclickhouse/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/whiteCcinn/ccinnclickhouse/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/whiteCcinn/ccinnclickhouse/releases/tag/v1.0.0
