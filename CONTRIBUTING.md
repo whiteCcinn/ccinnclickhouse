@@ -40,7 +40,7 @@ CCINNCLICKHOUSE_PASSWORD=ccinn-pass dist/CcinnClickHouse.app/Contents/MacOS/Ccin
   --connect 127.0.0.1:18101 --user ccinn --database shop --object shop.events --section parts
 ```
 
-Passwords never go on the command line. Other launch arguments: `--https`, `--cluster <name>`, `--read-only`, `--sql "…" --auto-run [--view chart|plan]`, `--operations running|merges|mutations|replication|querylog|storage|dictionaries|cluster`, `--profile <saved name>`, `--duplicate-window` (once connected, opens a second window with the same connection, as ⇧⌘N does) and `--snapshot <file.png> --snapshot-delay <seconds> --quit-after-snapshot [--appearance light|dark]`, which renders the front window into a PNG without showing it, without a Dock icon and without taking focus.
+Passwords never go on the command line. Other launch arguments: `--https`, `--cluster <name>`, `--read-only`, `--sql "…" [--format] --auto-run [--view chart|plan]` (`--format` formats the text as ⌥⌘L does), `--operations running|merges|mutations|replication|querylog|storage|dictionaries|cluster`, `--profile <saved name>`, `--duplicate-window` (once connected, opens a second window with the same connection, as ⇧⌘N does) and `--snapshot <file.png> --snapshot-delay <seconds> --quit-after-snapshot [--appearance light|dark]`, which renders the front window into a PNG without showing it, without a Dock icon and without taking focus.
 
 ## Project layout
 
@@ -55,9 +55,10 @@ Dependencies only point downwards; lower modules must not import higher ones.
 
 ## Guidelines
 
-- **Test first.** Add or update tests with every behaviour change. Protocol logic is covered with the local fake HTTP server in `Tests/ClickHouseKitTests/FakeClickHouseServer.swift`; ClickHouse behaviour with the integration suites.
+- **Test first.** Add or update tests with every behaviour change. Protocol logic is covered with the local fake HTTP server in `Tests/ClickHouseKitTests/FakeClickHouseServer.swift`; ClickHouse behaviour with the integration suites (error messages are recorded from real servers); AppKit behaviour of the editor (text storage, input methods) in `Tests/CcinnClickHouseAppTests`.
 - **Read server output by column name** and build `system.*` queries with `SystemSchema.selectList`, so a column a version lacks becomes `NULL` instead of an error.
 - **Never crash on input.** No force unwraps/casts, unchecked indexing or trapping integer conversions on data that comes from a server, a file or the user. Parsers are fuzzed; keep it that way.
+- **Format SQL must never change what a statement means.** It changes letter case only for words proven to be keywords where they stand, and whitespace only where `SQLFormatSpacing` allows it. The lexer must split tokens exactly like ClickHouse. With every new rule, add the syntax to `FormatterIntegrationTests`, which compares raw and formatted results on every server.
 - **Concurrency.** Code must compile in Swift 6 strict-concurrency mode. Keep shared mutable state inside actors or behind small, well-scoped locks; never block the main actor with I/O, sorting or chart preparation; use generation tokens wherever a late result could overwrite a newer one.
 - **Secrets** must never appear in logs, errors, URLs or files.
 - Keep pull requests focused, and update `CHANGELOG.md` under *Unreleased*.

@@ -51,7 +51,13 @@ CcinnClickHouse 把这些都放在一次点击之内。它是原生 SwiftUI/AppK
 - **SQL 工作台**
   - 懂 ClickHouse 的语法高亮（嵌套注释、heredoc、`{name:Type}` 参数）。
   - 由服务器提供的补全：**函数与聚合组合器**（`sumIf`、`uniqMerge`、`avgOrNullIf`）、`SET` / `SETTINGS` 后的 **设置项**（带说明）、格式、引擎、表函数、数据类型、集群，以及数据库、表、通过别名与 CTE 的列。
-  - 懂 `LIMIT … BY`、`SETTINGS`、`FORMAT` 的自动 `LIMIT`；查询运行时的 **实时进度**（已读行数与字节）；**真正的取消**；报错位置精确下划线。
+  - 懂 `LIMIT … BY`、`SETTINGS`、`FORMAT` 的自动 `LIMIT`；查询运行时的 **实时进度**（已读行数与字节）；**真正的取消**。
+  - **精确的报错提示**：在 ClickHouse 拒绝的那个词下方划线，并在该行末尾显示简短说明，例如 `Syntax error near 't'. Expected one of: …`，不再罗列 60 个候选项和回显的整条查询；保留 `Maybe you meant` 建议。即使服务器没有给出位置，也会按名称找到未知的列、表、数据库、函数和设置项，新旧 analyzer 都支持。标记会随编辑移动，修改出错语句后自动消失。
+  - 输入时即时提示未闭合的引号、注释、`$$` heredoc 和括号。
+  - **格式化 SQL**（Format SQL，⌥⌘L）把选中内容或整个脚本整理为一次可撤销的编辑：子句各占一行、列表每项一行、`AND`/`OR` 条件分行、子查询与 CTE 缩进、多分支 `CASE` 展开。
+    - ClickHouse 的名称和函数区分大小写，所以关键字默认保持原样。即使在设置中选择全大写或全小写，也只改写在该位置只能是关键字的词。
+    - 字符串、heredoc、注释和 `INSERT` 数据逐字节保留。
+    - 替换前会先证明结果与原文等价；无法证明时（例如 `1_000`，ClickHouse 22.8 把它读作名称）不做任何修改，并在编辑器下方的状态栏说明原因。
   - `EXPLAIN` 计划、带 **索引** 或 actions 的计划、**Pipeline**、**Estimate**、AST 与 Syntax。
   - 历史记录，CSV / TSV / `INSERT` 导出（二进制值保留原始字节）。
 - **任意查询生成图表。** 时间列加数值自动生成折线图，分类生成柱状图，两个数值生成散点图；可切换柱状、折线、面积、散点、饼图，选择坐标轴、系列与聚合方式。大结果集在后台缩减到最多 2,000 个点。
@@ -61,9 +67,9 @@ CcinnClickHouse 把这些都放在一次点击之内。它是原生 SwiftUI/AppK
   - **query_log 分析**：最慢、最耗内存、失败、最昂贵的查询模式，以及按用户汇总，可选时间窗口。
   - 磁盘与存储策略、字典，以及 **集群拓扑**（Keeper 状态、宏、`ON CLUSTER` 任务）。
 - **连接**
-  - **多窗口**，每个窗口使用独立连接：文件 ▸ 新建窗口（⌘N），**用当前连接新建窗口**（⇧⌘N，也可点工具栏的“新建窗口”按钮），或在已保存的连接上选择**在新窗口中打开**。
+  - **多窗口**，每个窗口使用独立连接：文件 ▸ 新建窗口（**New CcinnClickHouse Window**，⌘N），**用当前连接新建窗口**（⇧⌘N，也可点工具栏的“新建窗口”按钮），或在已保存的连接上选择**在新窗口中打开**。
   - HTTP 与 **HTTPS**（支持私有 CA，测试环境可跳过校验），反向代理路径前缀，**chproxy** 与负载均衡。
-  - 通过系统 OpenSSH 的 SSH 隧道（agent、密钥或密码）。
+  - 通过系统 OpenSSH 的 SSH 隧道（agent、密钥或密码）；隧道从不加入或成为共享的 `ControlMaster` 连接。
   - **由 ClickHouse 强制执行的只读连接**（`readonly=1`，连接时在真实请求路径上验证），以及执行修改数据或结构的语句前可选的确认。
 - **通过 MCP 让 AI 访问。** 内置 Model Context Protocol 服务，让 Claude Code、Codex、Claude Desktop 浏览并查询你授权的连接，默认只读。详见 [MCP 服务](#mcp-服务让-ai-查询-clickhouse)。
 - **默认安全。** 密码保存在 macOS 钥匙串中；除非你开启 AI 访问，否则不会收集或发送任何数据。
@@ -126,8 +132,9 @@ CcinnClickHouse 每天也会在后台自动检查一次，可以在 **设置 →
 | **⌘.** | 取消正在运行的语句 |
 | **⌃Space** | 显示补全 |
 | **⌘/** | 注释或取消注释 |
+| **⌥⌘L** | 格式化 SQL（选中内容或整个脚本） |
 | **⌘T** | 新建查询 |
-| **⌘N** | 新建窗口（连接另一台服务器，或同一台） |
+| **⌘N** | 新建窗口（New CcinnClickHouse Window；连接另一台服务器，或同一台） |
 | **⇧⌘N** | 用当前连接新建窗口 |
 | **⌥⌘1** / **⌥⌘2** | 运行中查询 / 查询日志 |
 | **⇧⌘R** | 刷新数据库 |
@@ -175,7 +182,15 @@ CcinnClickHouse 内置 **Model Context Protocol** 服务。**Claude Code**、**C
 
 - 密码留在钥匙串中，绝不会展示给 AI。
 - 只有你启用的连接可见。
-- `run_query` 只接受单条只读语句（`SELECT`、`WITH`、`SHOW`、`DESCRIBE`、`EXISTS`、`EXPLAIN`）。应用用自己的 SQL 词法分析器做检查，并拒绝访问 ClickHouse 外部的函数（`url`、`file`、`s3`、`remote`、`mysql`、`executable` 等）、白名单以外的表函数以及查询级 `SETTINGS`。
+- `run_query` 只接受单条只读语句（`SELECT`、`WITH`、`SHOW`、`DESCRIBE`、`EXISTS`、`EXPLAIN`）。应用用自己的 SQL 词法分析器做检查，并拒绝访问 ClickHouse 外部的函数（`url`、`file`、`s3`、`remote`、`mysql`、`executable` 等）、白名单以外的表函数、查询级 `SETTINGS`，以及带转义序列的引号名称（ClickHouse 会把 `` `\x66ile` `` 解码为 `file`）。
+- 检查针对实际发送的文本进行，即已加上自动 `LIMIT` 的文本。
+- AI 访问只能通过白名单读取 `system` 中用于结构浏览和诊断的表（`tables`、`columns`、`parts`、`merges`、`replicas`、`settings` 等）。其他会话的 SQL 文本和凭据（`query_log`、`processes`、`mutations`、`users`、`named_collections` 等）不会被直接读取。运行中查询、查询日志和 Mutation 工具只以摘要形式显示其他会话的 SQL：每个字符串、数字和带引号的值都会被替换为 `?`（不带引号的单词保留）。表函数同样采用白名单（只允许数据生成器和内联数据，不允许 `merge`、`loop`、`cluster`）。
+- 无论哪个版本，AI 访问都拿不到对象定义：22.8 会在定义中明文显示凭据，24.8 仍会明文显示 URL 中的凭据。定义列（`create_table_query`、`engine_full`、`as_select`、`create_query`、`view_definition`、`system.projections.query`）无论怎么写都会被拒绝；`SHOW CREATE`（以及 `SHOW TABLE` / `SHOW VIEW`）、`SHOW FUNCTIONS`、`EXPLAIN SYNTAX`（会展开视图的查询），以及对 `system.tables`、`system.databases`、`system.functions` 或 `information_schema` 使用 `count(*)` 以外的 `*`，也都会被拒绝。`describe_table` 只返回列、键和引擎名。执行计划中带引号的字符串显示为 `'?'`，结果只以工具自己的格式返回（不接受 `FORMAT` 子句），工具返回的所有内容中的凭据（URL 中的密码、凭据类键名的值）都会被遮盖。结果会注明遮盖了几处（`"masked": N`），其他数据不会被改动。
+- 管理员在系统表之上建的视图或字典，应用的检查看不到：AI 访问会像读普通表一样读取它们。请只给 AI 使用的用户授予它可以看的表的 `SELECT` 权限。
+- 在 22.8 和 24.8 上，标量函数 `file()` 无需 FILE 权限，任何用户都能读取 `user_files` 下的文件，此时拦住它的是应用自己的检查。26.8 要求 `READ ON FILE` 权限。
+- AI 查询只能调用审核过的函数：ClickHouse 22.8、24.8、26.8 自带的函数，去掉访问 ClickHouse 外部的（`file`、`ai*` 大模型函数、`catboostEvaluate` 等）、按名称读取对象的和会改变状态的。凡是查询里提到函数的写法都会检查：语句任意位置的函数调用、`APPLY`、传给高阶函数的裸函数名，以及 `arrayReduce('…')` 里写的聚合函数名。新版服务器新增的函数，在 CcinnClickHouse 更新审核之前都会被拒绝。`dictGet` 按设计允许，它读取的是管理员定义了数据源的字典。
+- settings profile 可以改变 ClickHouse 解析语句的方式（`dialect`、`polyglot_dialect`、`implicit_select`、`enable_json_ast_dialect`），也可以给没有 `FROM` 的查询指定一张表（`implicit_table_at_top_level`）。只读请求会带上这些设置的安全值，每条只读路径（连接时、每次 AI 工具调用、每批编辑器语句）都会先检查实际生效的值。如果 profile 设了 `readonly = 1`、无法覆盖这些设置，就会被拒绝。
+- **只允许仅有 `SELECT` 权限的用户**：每次调用前，只读 AI 工具都会检查该 ClickHouse 用户的权限（`SHOW GRANTS`）和实际生效的 `readonly` 级别。持有 `SOURCES`（`file()`、`url()`、`remote()` 等）、`SYSTEM`、访问管理或 `ALL` 权限的用户会被拒绝，因为 `readonly=1` 拦不住这些操作。可以在连接设置中显式允许这类用户，但不推荐。
 - **ClickHouse 也会强制执行**：只读连接的每个请求都带有 `readonly=1`，并且连接在使用前会在真实请求路径上检查 `getSetting('readonly')`。**chproxy 等代理会丢弃 `readonly`**；经由这类代理的只读访问会被拒绝，除非代理背后的 ClickHouse 用户本身使用只读设置配置（把代理用户映射到这样的用户）。
 - 在设置中修改连接的 AI 访问权限，会立即作用于正在运行的 MCP 服务。
 - 每次工具调用都是独立的无状态请求：某次调用中的 `SET`、`USE` 或临时表不会带入下一次调用。
