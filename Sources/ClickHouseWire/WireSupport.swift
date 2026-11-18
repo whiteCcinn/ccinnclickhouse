@@ -99,14 +99,15 @@ public struct QueryProgress: Sendable, Equatable {
 
 /// Safe construction of identifiers and literals for statements the app builds itself.
 public enum SQLText {
-    /// Back-quoted identifier with backslash escapes; NUL bytes removed.
+    /// Back-quoted identifier with backslash escapes. C0 control characters and DEL become `\xHH`, which ClickHouse
+    /// decodes back: nothing is dropped, so the server reads exactly the name given (a dropped NUL would name another).
     public static func quoteIdentifier(_ name: String) -> String {
         var escaped = "`"
         for scalar in name.unicodeScalars {
             switch scalar {
-            case "\0": continue
             case "\\": escaped += "\\\\"
             case "`": escaped += "\\`"
+            case _ where scalar.value < 0x20 || scalar.value == 0x7F: escaped += String(format: "\\x%02X", scalar.value)
             default: escaped.unicodeScalars.append(scalar)
             }
         }
@@ -118,14 +119,16 @@ public enum SQLText {
         parts.compactMap { $0 }.filter { !$0.isEmpty }.map(quoteIdentifier).joined(separator: ".")
     }
 
-    /// Single-quoted string literal with backslash escapes.
+    /// Single-quoted string literal. `'` is doubled (`''`), never backslash-escaped: under a dialect without backslash
+    /// escapes (polyglot/postgresql) a `\'` would end the string early. `\` and control characters keep their backslash
+    /// escapes, which ClickHouse SQL reads back exactly.
     public static func literal(_ value: String) -> String {
         var escaped = "'"
         escaped.reserveCapacity(value.utf8.count + 2)
         for scalar in value.unicodeScalars {
             switch scalar {
             case "\\": escaped += "\\\\"
-            case "'": escaped += "\\'"
+            case "'": escaped += "''"
             case "\0": escaped += "\\0"
             case "\n": escaped += "\\n"
             case "\r": escaped += "\\r"

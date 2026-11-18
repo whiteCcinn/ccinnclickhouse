@@ -36,13 +36,21 @@ struct WireSupportTests {
     @Test func identifierQuoting() {
         #expect(SQLText.quoteIdentifier("events") == "`events`")
         #expect(SQLText.quoteIdentifier("we`ird\\name") == "`we\\`ird\\\\name`")
-        #expect(SQLText.quoteIdentifier("nul\0byte") == "`nulbyte`")
+        // Control characters are escaped, never dropped: a dropped NUL would name another object than the one asked for.
+        #expect(SQLText.quoteIdentifier("nul\0byte") == "`nul\\x00byte`")
+        #expect(SQLText.quoteIdentifier("a\u{1}b\nc\u{7F}") == "`a\\x01b\\x0Ac\\x7F`")
         #expect(SQLText.qualified("db", "t") == "`db`.`t`")
         #expect(SQLText.qualified(nil, "t") == "`t`")
     }
 
+    /// `'` is doubled, never backslash-escaped: under a dialect without backslash escapes (polyglot/postgresql) `\'`
+    /// would end the string early, and AI-supplied names in metadata tools never pass the guard.
     @Test func literalQuoting() {
-        #expect(SQLText.literal("it's") == "'it\\'s'")
+        #expect(SQLText.literal("it's") == "'it''s'")
+        #expect(SQLText.literal("x'") == "'x'''")
+        #expect(SQLText.literal("x\\") == "'x\\\\'")
+        #expect(SQLText.literal("\\'") == "'\\\\'''")
+        #expect(SQLText.literal("x\\' UNION SELECT 'i' --") == "'x\\\\'' UNION SELECT ''i'' --'")
         #expect(SQLText.literal("a\\b\nc\t\0") == "'a\\\\b\\nc\\t\\0'")
         #expect(SQLText.literal("中文") == "'中文'")
     }

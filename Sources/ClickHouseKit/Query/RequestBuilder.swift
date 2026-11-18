@@ -86,6 +86,8 @@ public struct ConnectionCapabilities: Sendable, Equatable {
 /// Builds HTTP requests for statements (pure; unit-tested).
 public struct RequestBuilder: Sendable {
     public static let resultFormat = "TabSeparatedWithNamesAndTypes"
+    /// The purpose of the connection probe, which learns the settings this server accepts.
+    public static let probePurpose = "probe"
     public static let compressBodyThreshold = 64 * 1024
     public static let progressIntervalMilliseconds = 10_000
     /// Idle timeout for statements without their own limit.
@@ -129,6 +131,12 @@ public struct RequestBuilder: Sendable {
         settings.append(("cancel_http_readonly_queries_on_client_close", "1"))
         if configuration.compression { settings.append(("enable_http_compression", "1")) }
         settings.append(("format_tsv_null_representation", "\\N"))
+        // Read-only requests parse as ClickHouse SQL with no implicit table, whatever the user's profile says (ParserSettings).
+        // The connection probe sends them too, on every connection, to learn which ones this server accepts: a read-write
+        // client still makes read-only requests (MCP run_query on a read-write profile).
+        if options.readOnly ?? configuration.readOnly || options.purpose == Self.probePurpose {
+            for setting in ParserSettings.forced { settings.append((setting.name, setting.value)) }
+        }
         // Tags the query with its id: proxies such as chproxy replace `query_id`, and the kill and
         // progress lookups fall back to this marker (design D5).
         settings.append(("log_comment", Self.marker(application: configuration.applicationName, queryID: queryID)))

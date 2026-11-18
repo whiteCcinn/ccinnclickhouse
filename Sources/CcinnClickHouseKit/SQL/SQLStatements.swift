@@ -283,19 +283,20 @@ public enum AutoLimit {
         }
         let units = statement.lexer.units
         let offset: Int
-        if let insertBefore {
-            offset = statement.tokens[insertBefore].range.lowerBound
+        if let insertBefore, insertBefore > 0 {
+            // Right after the last token before SETTINGS / FORMAT, on a line of its own: no comment before it can absorb
+            // it, and it never starts one (a `#` or `$` before it stays what it was).
+            offset = statement.tokens[insertBefore - 1].range.upperBound
             let head = String(decoding: units[0..<offset], as: UTF16.self)
             let tail = String(decoding: units[offset...], as: UTF16.self)
-            let separator = head.last?.isWhitespace == true ? "" : " "
-            let inserted = separator + "LIMIT \(limit) "
+            let inserted = "\nLIMIT \(limit)" + (tail.first.map { $0.isWhitespace } == true ? "" : " ")
             return Outcome(sql: head + inserted + tail, applied: true, insertion: offset..<(offset + inserted.utf16.count))
         }
         guard let lastSignificant else { return Outcome(sql: sql, applied: false) }
         offset = statement.tokens[lastSignificant].range.upperBound
         let head = String(decoding: units[0..<offset], as: UTF16.self)
         let tail = String(decoding: units[offset...], as: UTF16.self)
-        let inserted = " LIMIT \(limit)"
+        let inserted = "\nLIMIT \(limit)"
         return Outcome(sql: head + inserted + tail, applied: true, insertion: offset..<(offset + inserted.utf16.count))
     }
 

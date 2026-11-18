@@ -215,10 +215,8 @@ public struct ClickHouseMCPTools: MCPToolProvider {
                                      "name_filter": ["type": "string", "description": "Case-insensitive substring to filter table names."]],
                                     required: ["database"]), readOnly: true),
         MCPTool(name: "describe_table", title: "Describe table",
-                description: "Columns (type, default, codec, comment, compressed/uncompressed size and ratio, key membership, TTL), engine and keys (partition, sorting, primary, sampling), table TTL, settings, projections, skipping indexes, dependent materialized views, Distributed/MV targets and optionally the CREATE statement.",
-                inputSchema: schema(["database": databaseProperty, "table": tableProperty,
-                                     "include_ddl": ["type": "boolean", "description": "Include the CREATE statement (default true)."]],
-                                    required: ["database", "table"]), readOnly: true),
+                description: "Columns (type, default, codec, comment, compressed/uncompressed size and ratio, key membership, TTL), engine name and keys (partition, sorting, primary, sampling), projections, skipping indexes, dependent materialized views and the MV target. Object definitions (DDL, engine arguments and settings, view queries) are withheld from AI access.",
+                inputSchema: schema(["database": databaseProperty, "table": tableProperty], required: ["database", "table"]), readOnly: true),
         MCPTool(name: "get_parts", title: "Get partitions and parts",
                 description: "Partitions of a MergeTree table (active/inactive parts, rows, bytes, compression) with part-count warnings against parts_to_delay_insert / parts_to_throw_insert, and optionally the newest active parts.",
                 inputSchema: schema(["database": databaseProperty, "table": tableProperty,
@@ -262,10 +260,10 @@ public struct ClickHouseMCPTools: MCPToolProvider {
                                      "timeout_seconds": ["type": "number", "minimum": 1, "maximum": .int(Int64(maxTimeout)), "description": "Time limit (default 30)."]],
                                     required: ["sql"]), readOnly: true, idempotent: false),
         MCPTool(name: "explain_query", title: "Explain query",
-                description: "Explains a SELECT query: plan, plan_indexes (index usage), pipeline, estimate (rows/marks/parts to read), ast or syntax.",
+                description: "Explains a SELECT query: plan, plan_indexes (index usage), pipeline, estimate (rows/marks/parts to read) or ast. Quoted strings in the result are shown as '?'.",
                 inputSchema: schema(["sql": ["type": "string", "description": "A SELECT or WITH query."],
                                      "database": ["type": "string", "description": "Current database for unqualified names."],
-                                     "kind": ["type": "string", "enum": ["plan", "plan_indexes", "pipeline", "estimate", "ast", "syntax"], "description": "Kind of EXPLAIN (default plan_indexes)."]],
+                                     "kind": ["type": "string", "enum": ["plan", "plan_indexes", "pipeline", "estimate", "ast"], "description": "Kind of EXPLAIN (default plan_indexes)."]],
                                     required: ["sql"]), readOnly: true),
     ]
 
@@ -301,9 +299,10 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         let context = CallContext()
         let result: MCPToolResult
         do {
-            result = .success(try await dispatch(name, Arguments(arguments), context))
+            // Defence in depth under the guard: credentials are masked in every string a tool returns.
+            result = .success(Self.maskingSecrets(try await dispatch(name, Arguments(arguments), context)))
         } catch let error as MCPToolError {
-            result = .failure(error.message)
+            result = .failure(SQLRedactor.maskMessageSecrets(error.message))
         } catch let error as ClickHouseError {
             // A broken connection (network, TLS, SSH tunnel) is re-opened on the next call.
             if [.network, .tls, .sshTunnel].contains(error.kind), let profileID = context.profileID {
@@ -312,11 +311,12 @@ public struct ClickHouseMCPTools: MCPToolProvider {
             var message = error.message
             if let code = error.code { message += " (code \(code)\(error.name.map { ", \($0)" } ?? ""))" }
             if error.code == ClickHouseError.Code.readonly { message += " The connection is read-only for AI access." }
-            result = .failure(message)
+            // Server errors can echo a view's query (`while processing query: …`).
+            result = .failure(SQLRedactor.maskMessageSecrets(message))
         } catch is CancellationError {
             result = .failure("The call was cancelled.")
         } catch {
-            result = .failure(error.localizedDescription)
+            result = .failure(SQLRedactor.maskMessageSecrets(error.localizedDescription))
         }
         let elapsed = clock.now - started
         let milliseconds = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
@@ -336,15 +336,19 @@ public struct ClickHouseMCPTools: MCPToolProvider {
             throw MCPToolError("Unknown tool “\(name)”. Available tools: \(definitions.map(\.name).joined(separator: ", ")).")
         }
         try args.validate(against: definition.inputSchema)
+        if let key = args.controlCharacterArgument() {
+            throw MCPToolError("`\(key)` contains a control character. Names are sent to the server as given, so they must be plain text.")
+        }
         if name == "list_connections" { return Self.listConnections(resolver) }
         let resolved = try resolver.resolve(args.string("connection"))
         context.connection = resolved.profile.displayName
         context.profileID = resolved.profile.id
         // Refuse what can be refused without a connection: nothing is opened or sent for rejected SQL.
         switch name {
-        case "run_query":
+        case "run_query", "explain_query":
             let sql = try args.required("sql")
-            if let reason = ReadOnlySQLGuard.check(sql) {
+            let database = args.string("database")?.trimmingCharacters(in: .whitespaces).nilIfEmpty ?? resolved.profile.defaultDatabase
+            if let reason = ReadOnlySQLGuard.check(sql, audience: .ai(database: database)) {
                 context.statement = sql
                 throw MCPToolError(reason + (resolved.access == .readWrite ? " Use execute_statement for statements that change data." : ""))
             }
@@ -356,6 +360,11 @@ public struct ClickHouseMCPTools: MCPToolProvider {
             break
         }
         let client = try await registry.client(for: resolved.profile, access: resolved.access)
+        // Before every read-only call: the user's grants (a privileged user is refused unless the connection opts in:
+        // readonly=1 does not stop file(), url(), SYSTEM or access management) and the effective readonly level.
+        if resolved.access != .readWrite {
+            if let refusal = await MCPPrivilegeReport.readOnlyRefusal(client: client, profile: resolved.profile) { throw MCPToolError(refusal) }
+        }
         let cluster = args.string("cluster") ?? resolved.profile.defaultCluster?.trimmingCharacters(in: .whitespaces).nilIfEmpty
         switch name {
         case "list_databases":
@@ -436,18 +445,9 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         for index in columns.indices { columns[index].ttl = details.columnTTLs[columns[index].name] }
         var result = Self.encode(table: table).objectValue ?? [:]
         result["columns"] = .array(columns.map(Self.encode(column:)))
-        if let definition = table.engineDefinition {
-            result["engine_full"] = JSONValue(table.engineFull)
-            result["ttl"] = JSONValue(definition.ttl)
-            result["settings"] = .object(Dictionary(definition.settings.map { ($0.name, JSONValue.string($0.value)) }, uniquingKeysWith: { $1 }))
-            if let target = definition.distributedTarget {
-                result["distributed"] = ["cluster": .string(target.cluster), "database": .string(target.database), "table": .string(target.table),
-                                         "sharding_key": JSONValue(target.shardingKey)]
-            }
-            if let replication = definition.replicationPath {
-                result["replication"] = ["zookeeper_path": .string(replication.path), "replica_name": .string(replication.replica)]
-            }
-        }
+        // Deny by default: no object definitions for AI access, on any version (22.8 prints credentials in them, 24.8 still
+        // prints the ones in URLs). Columns, keys and the engine name stay; engine arguments, settings and queries do not.
+        result["definitions_withheld"] = .string(Self.definitionsWithheldNote)
         if table.family.hasParts {
             async let indices = client.skippingIndices(database: database, table: table.name)
             async let projections = client.projections(database: database, table: table.name, createStatement: table.createTableQuery)
@@ -458,16 +458,12 @@ public struct ClickHouseMCPTools: MCPToolProvider {
             })
             result["projections"] = .array(try await projections.map { projection in
                 ["name": .string(projection.name), "type": JSONValue(projection.type), "sorting_key": JSONValue(projection.sortingKey),
-                 "definition": JSONValue(projection.definition), "parts": JSONValue(projection.parts), "rows": JSONValue(projection.rows),
+                 "parts": JSONValue(projection.parts), "rows": JSONValue(projection.rows),
                  "bytes_on_disk": JSONValue(projection.bytesOnDisk)]
             })
         }
         if !table.dependentTables.isEmpty { result["dependent_tables"] = .array(table.dependentTables.map(JSONValue.string)) }
         if let target = details.materializedViewTarget { result["materialized_view_target"] = .string(target) }
-        if let query = table.asSelect { result["as_select"] = .string(String(query.prefix(20_000))) }
-        if args.bool("include_ddl") ?? true, let ddl = table.createTableQuery {
-            result["ddl"] = .string(ddl.utf8.count > 60_000 ? MCPResultEncoder.prefix(ddl, maxBytes: 60_000) + "\n-- (truncated)" : ddl)
-        }
         return .object(result)
     }
 
@@ -527,8 +523,11 @@ public struct ClickHouseMCPTools: MCPToolProvider {
             }),
             "mutations": .array(try await mutations.map { mutation in
                 ["database": .string(mutation.database), "table": .string(mutation.table), "mutation_id": .string(mutation.mutationID),
-                 "command": .string(String(mutation.command.prefix(2_000))), "created": JSONValue(mutation.createTime), "parts_to_do": .int(mutation.partsToDo),
-                 "is_done": .bool(mutation.isDone), "latest_fail_reason": JSONValue(mutation.latestFailReason.map { String($0.prefix(2_000)) }),
+                 "command": .string(String(SQLRedactor.digest(mutation.command).prefix(2_000))), "created": JSONValue(mutation.createTime),
+                 "parts_to_do": .int(mutation.partsToDo), "is_done": .bool(mutation.isDone),
+                 "latest_fail_reason": JSONValue(mutation.latestFailReason.map {
+                     String(SQLRedactor.digestMessage($0, statements: [mutation.command]).prefix(2_000))
+                 }),
                  "latest_failed_part": JSONValue(mutation.latestFailedPart)]
             }),
         ]
@@ -553,10 +552,23 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         ]
         if queueLimit > 0 {
             let queue = try await client.replicationQueue(database: database, table: table, limit: queueLimit)
+            // A failing MUTATE_PART repeats the mutation's literal values in its error: those of the table's mutations are
+            // masked there. If the mutations cannot be read, the errors are withheld.
+            var mutationCommands: [String: [String]]? = [:]
+            if queue.contains(where: { $0.lastException != nil }) {
+                mutationCommands = (try? await client.mutations(database: database, table: table, activeOnly: true, limit: 1_000))
+                    .map { Dictionary(grouping: $0, by: { "\($0.database).\($0.table)" }).mapValues { $0.map(\.command) } }
+            }
+            func lastException(_ entry: ReplicationQueueEntry) -> JSONValue {
+                guard let message = entry.lastException else { return .null }
+                guard let commands = mutationCommands else { return "(withheld: the table's mutations, whose values it may repeat, could not be read)" }
+                return .string(String(SQLRedactor.digestMessage(message, statements: commands["\(entry.database).\(entry.table)"] ?? []).prefix(2_000)))
+            }
             result["queue"] = .array(queue.map { entry in
                 ["database": .string(entry.database), "table": .string(entry.table), "type": .string(entry.type), "node": .string(entry.nodeName),
                  "new_part": JSONValue(entry.newPartName), "tries": .int(entry.numTries), "executing": .bool(entry.isCurrentlyExecuting),
-                 "postpone_reason": JSONValue(entry.postponeReason), "last_exception": JSONValue(entry.lastException.map { String($0.prefix(2_000)) }),
+                 "postpone_reason": JSONValue(entry.postponeReason),
+                 "last_exception": lastException(entry),
                  "created": JSONValue(entry.createTime)]
             })
         }
@@ -572,7 +584,8 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         case "patterns":
             guard let patterns = try await client.queryPatterns(hours: hours, limit: limit) else { throw unavailable }
             return ["analysis": "patterns", "hours": .double(hours), "patterns": .array(patterns.map { pattern in
-                ["sample": .string(String(pattern.sample.prefix(2_000))), "count": .int(pattern.count), "total_ms": .int(pattern.totalDurationMilliseconds),
+                ["sample": .string(String(SQLRedactor.digest(pattern.sample).prefix(2_000))), "count": .int(pattern.count),
+                 "total_ms": .int(pattern.totalDurationMilliseconds),
                  "avg_ms": .double((pattern.averageDurationMilliseconds * 10).rounded() / 10), "max_ms": .int(pattern.maxDurationMilliseconds),
                  "read_bytes": .int(pattern.totalReadBytes), "max_memory": .int(pattern.maxMemoryUsage), "failures": .int(pattern.failures)]
             })]
@@ -588,8 +601,8 @@ public struct ClickHouseMCPTools: MCPToolProvider {
             return ["analysis": .string(analysis), "hours": .double(hours), "queries": .array(entries.map { entry in
                 ["time": .string(entry.eventTime), "duration_ms": .int(entry.durationMilliseconds), "read_rows": .int(entry.readRows),
                  "read_bytes": .int(entry.readBytes), "result_rows": .int(entry.resultRows), "memory": .int(entry.memoryUsage), "user": .string(entry.user),
-                 "query_id": .string(entry.queryID), "query": .string(String(SQLRedactor.redact(entry.query).prefix(2_000))),
-                 "exception": JSONValue(entry.exception.map { String($0.prefix(1_000)) })]
+                 "query_id": .string(entry.queryID), "query": .string(String(SQLRedactor.digest(entry.query).prefix(2_000))),
+                 "exception": JSONValue(entry.exception.map { String(SQLRedactor.digestMessage($0, statements: [entry.query]).prefix(1_000)) })]
             })]
         default:
             throw MCPToolError("Unknown analysis “\(analysis)”; use slowest, memory, failed, patterns or by_user.")
@@ -618,27 +631,63 @@ public struct ClickHouseMCPTools: MCPToolProvider {
             "macros": .object(Dictionary(try await macros.map { ($0.name, JSONValue.string($0.value)) }, uniquingKeysWith: { $1 })),
             "recent_ddl": .array(try await ddl.map { entry in
                 ["entry": .string(entry.entry), "host": JSONValue(entry.host), "status": JSONValue(entry.status),
-                 "query": .string(String(SQLRedactor.redact(entry.query).prefix(1_000))), "exception_code": JSONValue(entry.exceptionCode)]
+                 "query": .string(String(SQLRedactor.digest(entry.query).prefix(1_000))), "exception_code": JSONValue(entry.exceptionCode)]
             }),
         ]
     }
 
     // MARK: SQL tools
 
+    /// The database unqualified names resolve in for a call: the argument, the connection's, or the user's default.
+    static func effectiveDatabase(_ args: Arguments, _ client: ClickHouseClient) -> String? {
+        database(args, client) ?? client.serverInfo.defaultDatabase
+    }
+
+    /// The guard's AI audience for a call on `client`.
+    static func aiAudience(_ args: Arguments, _ client: ClickHouseClient) -> ReadOnlySQLGuard.Audience {
+        .ai(database: effectiveDatabase(args, client))
+    }
+
+    static let definitionsWithheldNote = "Object definitions (DDL, engine arguments and settings, view and projection queries) are withheld from AI access because they can carry credentials; columns, keys and the engine name are shown."
+
+    /// Every string in `value` with credentials masked (`SQLRedactor.maskSecrets`). When values were altered, the result
+    /// says how many (`"masked": N`), so the AI does not take them for the data; the echoed `statement` (the AI's own
+    /// text) is masked too but not counted.
+    static func maskingSecrets(_ value: JSONValue) -> JSONValue {
+        guard case let .object(members) = value else { return value.mappingStrings { SQLRedactor.maskSecrets($0).text } }
+        var masked = 0
+        var result: [String: JSONValue] = [:]
+        for (key, member) in members {
+            result[key] = member.mappingStrings { text in
+                let outcome = SQLRedactor.maskSecrets(text)
+                if key != "statement" { masked += outcome.count }
+                return outcome.text
+            }
+        }
+        if masked > 0 { result["masked"] = .int(Int64(masked)) }
+        return .object(result)
+    }
+
+    /// An EXPLAIN result as AI access may see it: 26.8 prints the literals of the views a query reads in plans
+    /// (`Filter column: … != 'secret'`), so every quoted string becomes `'?'`.
+    static func maskingPlanLiterals(_ payload: [String: JSONValue]) -> [String: JSONValue] {
+        payload.mapValues { $0.mappingStrings(SQLRedactor.maskStringLiterals) }
+    }
+
     private func runQuery(_ client: ClickHouseClient, _ args: Arguments, _ context: CallContext, access: MCPAccess) async throws -> JSONValue {
         let sql = try args.required("sql")
-        if let reason = ReadOnlySQLGuard.check(sql) {
-            throw MCPToolError(reason + (access == .readWrite ? " Use execute_statement for statements that change data." : ""))
-        }
         guard let statement = SQLStatementSplitter.split(sql).first?.text else { throw MCPToolError("The statement is empty.") }
         let limit = args.int("limit", default: Self.defaultRowLimit, range: 1...Self.maxRowLimit)
-        var executed = statement
-        var limitApplied = false
-        if SQLStatementKind.of(statement) == .query {
-            let outcome = AutoLimit.apply(to: statement, limit: limit + 1)
-            executed = outcome.sql
-            limitApplied = outcome.applied
+        // The exact text sent (with the automatic LIMIT) is what the guard checks.
+        let prepared: ReadOnlySQLGuard.Prepared
+        switch ReadOnlySQLGuard.prepare(statement, autoLimit: limit + 1, audience: Self.aiAudience(args, client)) {
+        case let .success(value): prepared = value
+        case let .failure(refusal):
+            context.statement = sql
+            throw MCPToolError(refusal.reason + (access == .readWrite ? " Use execute_statement for statements that change data." : ""))
         }
+        let executed = prepared.text
+        let limitApplied = prepared.limit != nil
         context.statement = executed
         let timeout = min(max(args.double("timeout_seconds") ?? Self.defaultTimeout, 1), Self.maxTimeout)
         // Read-only calls are also enforced by ClickHouse itself (readonly=1).
@@ -646,6 +695,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
                                                                           limits: RowLimits(maxRows: limit, maxBytes: 64 * 1024 * 1024),
                                                                           timeout: timeout, readOnly: true, idempotent: true))
         var payload = Self.encode(result: result, limit: limit)
+        if SQLStatementKind.of(executed) == .explain { payload = Self.maskingPlanLiterals(payload) }
         context.rows = payload["row_count"]?.intValue.map { Int(clamping: $0) }
         payload["statement"] = .string(executed)
         payload["limit_applied"] = .bool(limitApplied)
@@ -669,24 +719,29 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         case "pipeline": prefix = "EXPLAIN PIPELINE"
         case "estimate": prefix = "EXPLAIN ESTIMATE"
         case "ast": prefix = "EXPLAIN AST"
-        case "syntax": prefix = "EXPLAIN SYNTAX"
-        case let other: throw MCPToolError("Unknown kind “\(other)”; use plan, plan_indexes, pipeline, estimate, ast or syntax.")
+        case let other: throw MCPToolError("Unknown kind “\(other)”; use plan, plan_indexes, pipeline, estimate or ast.")
         }
-        let body = SQLStatementKind.of(statement) == .explain ? statement : "\(prefix) \(statement)"
-        if let reason = ReadOnlySQLGuard.check(body) { throw MCPToolError(reason) }
+        // The exact text sent (with its EXPLAIN head) is what the guard checks.
+        let prepared = ReadOnlySQLGuard.prepare(statement, prefix: SQLStatementKind.of(statement) == .explain ? nil : prefix,
+                                                audience: Self.aiAudience(args, client))
+        let body: String
+        switch prepared {
+        case let .success(value): body = value.text
+        case let .failure(refusal): throw MCPToolError(refusal.reason)
+        }
         context.statement = body
         let result = try await client.run(body, options: QueryOptions(purpose: "mcp", database: Self.database(args, client),
                                                                       limits: RowLimits(maxRows: 20_000, maxBytes: 16 * 1024 * 1024),
                                                                       timeout: Self.defaultTimeout, readOnly: true, idempotent: true))
         if result.columns.count > 1 {
             // EXPLAIN ESTIMATE returns a table.
-            var payload = Self.encode(result: result, limit: 1_000)
+            var payload = Self.maskingPlanLiterals(Self.encode(result: result, limit: 1_000))
             payload["statement"] = .string(body)
             context.rows = result.rows.count
             return .object(payload)
         }
         let lines = result.rows.map { $0.compactMap { $0 }.joined(separator: "\t") }
-        var plan = lines.joined(separator: "\n")
+        var plan = SQLRedactor.maskStringLiterals(lines.joined(separator: "\n"))
         if plan.utf8.count > MCPResultEncoder.defaultMaxBytes { plan = MCPResultEncoder.prefix(plan, maxBytes: MCPResultEncoder.defaultMaxBytes) + "\n… (truncated)" }
         context.rows = lines.count
         return ["statement": .string(body), "plan": .string(plan)]
@@ -797,7 +852,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         ["host": JSONValue(query.host), "query_id": .string(query.queryID), "user": .string(query.user),
          "elapsed_seconds": .double((query.elapsed * 10).rounded() / 10), "read_rows": .int(query.readRows), "read_bytes": .int(query.readBytes),
          "total_rows_approx": .int(query.totalRowsApprox), "memory": .int(query.memoryUsage), "is_initial": .bool(query.isInitialQuery),
-         "query": .string(String(SQLRedactor.redact(query.query).prefix(2_000)))]
+         "query": .string(String(SQLRedactor.digest(query.query).prefix(2_000)))]
     }
 
     static func encode(disk: DiskInfo) -> JSONValue {
@@ -850,6 +905,16 @@ struct Arguments: Sendable {
         }
         for required in schema["required"]?.arrayValue?.compactMap(\.stringValue) ?? [] where string(required) == nil {
             throw MCPToolError("Missing required argument `\(required)`.")
+        }
+    }
+
+    /// The first argument other than `sql` whose text holds a control character (Unicode Cc: NUL, C0, DEL, C1). A step
+    /// that drops or rewrites one (a wire writer, identifier quoting) would make the server read another name than the
+    /// one checked; such names are refused before anything is sent.
+    func controlCharacterArgument() -> String? {
+        values.keys.sorted().first { key in
+            guard key != "sql", case let .string(text) = values[key] else { return false }
+            return text.unicodeScalars.contains { $0.properties.generalCategory == .control }
         }
     }
 

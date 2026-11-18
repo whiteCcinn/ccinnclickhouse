@@ -2,8 +2,18 @@ import Foundation
 
 /// Keyword vocabulary for ClickHouse SQL (highlighting, completion, quoting).
 public enum SQLKeywords {
+    /// The words of a space-separated list. A plain loop: the `split(…).map(String.init)` chain took over 200 ms to
+    /// type-check, which older compilers (Swift 6.2 in CI) may give up on.
+    private static func words(_ text: String) -> Set<String> {
+        var result = Set<String>()
+        for word in text.split(whereSeparator: { (character: Character) -> Bool in character == " " || character == "\n" }) {
+            result.insert(String(word))
+        }
+        return result
+    }
+
     /// Words highlighted as keywords.
-    public static let all: Set<String> = Set("""
+    public static let all: Set<String> = words("""
     ADD ADMIN AFTER ALIAS ALL ALTER AND ANTI ANY ARRAY AS ASC ASOF ASYNC ATTACH BACKUP BEGIN BETWEEN BOTH BY CASE CAST CHECK \
     CLEAR CLUSTER CODEC COLLATE COLUMN COLUMNS COMMENT COMMIT CONSTRAINT CREATE CROSS CUBE CURRENT DATABASE DATABASES DATE \
     DAY DEDUPLICATE DEFAULT DELETE DESC DESCRIBE DETACH DETACHED DICTIONARIES DICTIONARY DISTINCT DIV DROP ELSE EMPTY END \
@@ -17,15 +27,15 @@ public enum SQLKeywords {
     ROWS SAMPLE SECOND SELECT SEMI SETTINGS SET SHOW SOURCE START STEP STOP SUBSTRING SYNC SYNTAX SYSTEM TABLE TABLES \
     TEMPORARY TEST THEN TIES TIMESTAMP TO TOP TOTALS TRAILING TRANSACTION TREE TRIM TRUE TRUNCATE TTL TYPE UNBOUNDED UNDROP \
     UNFREEZE UNION UPDATE USE USER USERS USING UUID VALUES VIEW VOLUME WATCH WEEK WHEN WHERE WINDOW WITH YEAR
-    """.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init))
+    """)
 
     /// Words that must be back-quoted when used as identifiers.
-    public static let reserved: Set<String> = Set("""
+    public static let reserved: Set<String> = words("""
     ALL ALTER AND ANTI ANY ARRAY AS ASC ASOF BETWEEN BY CASE CAST CREATE CROSS DATABASE DEFAULT DELETE DESC DESCRIBE DISTINCT \
     DROP ELSE END EXCEPT EXISTS EXPLAIN FALSE FINAL FORMAT FROM FULL GLOBAL GROUP HAVING IF ILIKE IN INNER INSERT INTERSECT \
     INTERVAL INTO IS JOIN KEY KILL LEFT LIKE LIMIT NOT NULL OFFSET ON OR ORDER OUTER PARTITION PREWHERE PRIMARY RIGHT SAMPLE \
     SELECT SEMI SET SETTINGS SHOW TABLE THEN TO TOP TRUE UNION UPDATE USING VALUES WHEN WHERE WITH
-    """.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init))
+    """)
 
     /// Keywords that start a statement.
     public static let statementStarters: [String] = [

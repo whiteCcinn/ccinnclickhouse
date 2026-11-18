@@ -85,11 +85,14 @@ public final class ClickHouseClient: Sendable {
     static func probe(_ configuration: ConnectionConfiguration, baseURL: URL, transport: any ClickHouseTransport,
                       capabilities: inout ConnectionCapabilities) async throws -> ServerInfo {
         var sql = probeSQL
-        for _ in 0..<8 {
+        // One round per setting the server turns down: readonly, locked settings, and each unknown or pinned setting
+        // (22.8 knows none of the five parser settings).
+        for _ in 0..<16 {
             let builder = RequestBuilder(configuration: configuration, baseURL: baseURL, capabilities: capabilities)
             do {
                 let outcome = try await run(sql, builder: builder, transport: transport,
-                                            options: QueryOptions(purpose: "meta", limits: .metadata, timeout: nil, waitEndOfQuery: true, idempotent: true))
+                                            options: QueryOptions(purpose: RequestBuilder.probePurpose, limits: .metadata, timeout: nil,
+                                                                  waitEndOfQuery: true, idempotent: true))
                 let record = outcome.result.first
                 // At readonly=2 a later per-request readonly=1 (MCP run_query) would be refused.
                 if let level = record?.int("readonly"), level >= 2 { capabilities.serverEnforcesReadOnly = true }
@@ -106,6 +109,12 @@ public final class ClickHouseClient: Sendable {
                 }
                 if error.code == ClickHouseError.Code.readonly, !capabilities.settingsLocked, error.message.contains("Cannot modify") {
                     capabilities.settingsLocked = true
+                    continue
+                }
+                // A profile constraint that pins a forced parser setting: not sent, and verified instead (ParserSettings).
+                if error.code == ClickHouseError.Code.settingConstraintViolation, let name = unknownSettingName(error.message),
+                   ParserSettings.forced.contains(where: { $0.name == name }), !capabilities.unsupportedSettings.contains(name) {
+                    capabilities.unsupportedSettings.insert(name)
                     continue
                 }
                 if error.code == ClickHouseError.Code.unknownSetting, let name = unknownSettingName(error.message),
@@ -133,6 +142,17 @@ public final class ClickHouseClient: Sendable {
             let outcome = try? await run("SELECT getSetting('readonly') AS readonly", builder: builder, transport: transport,
                                          options: QueryOptions(purpose: "meta", limits: .metadata, timeout: 15, waitEndOfQuery: true, idempotent: true))
             level = outcome?.result.first?.int("readonly").map { Int(clamping: $0) }
+        }
+        if let level, level >= 1 {
+            // The parser settings a read-only connection's statements are judged under (ParserSettings), on the real path.
+            var values: [String: String] = [:]
+            if let outcome = try? await run(ParserSettings.query, builder: builder, transport: transport,
+                                            options: QueryOptions(purpose: "meta", limits: .metadata, timeout: 15, waitEndOfQuery: true, idempotent: true)) {
+                for row in outcome.result.rows where row.count >= 2 {
+                    if let name = row[0] { values[name] = row[1] ?? "" }
+                }
+            }
+            if let refusal = ParserSettings.refusal(values) { throw ClickHouseError(.readOnlyNotEnforced, refusal) }
         }
         guard let level, level >= 1 else {
             throw ClickHouseError(.readOnlyNotEnforced, """

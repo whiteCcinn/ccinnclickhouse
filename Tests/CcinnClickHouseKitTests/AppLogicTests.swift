@@ -98,14 +98,18 @@ struct HistoryExportTests {
         let rows: [[String?]] = [["\u{FFFD}(", "1"], ["ok", "2"]]
         try ResultExport.write(to: url, columns: columns, rows: rows, binaryCells: [QueryResult.CellAddress(row: 0, column: 0): Data([0xC3, 0x28, 0x22])])
         let data = try Data(contentsOf: url)
-        #expect(data == Data("bin,n\r\n".utf8) + Data([0x22, 0xC3, 0x28, 0x22, 0x22, 0x22]) + Data(",1\r\nok,2\r\n".utf8))
+        var expected = Data("bin,n\r\n".utf8)
+        let quotedBinary: [UInt8] = [0x22, 0xC3, 0x28, 0x22, 0x22, 0x22]
+        expected.append(contentsOf: quotedBinary)
+        expected.append(Data(",1\r\nok,2\r\n".utf8))
+        #expect(data == expected)
     }
 
     @Test func insertStatementsKeepLiterals() {
         let columns = [ColumnDefinition(name: "id", typeName: "UInt64"), ColumnDefinition(name: "name", typeName: "String"),
                        ColumnDefinition(name: "tags", typeName: "Array(String)"), ColumnDefinition(name: "price", typeName: "Decimal(10, 2)")]
         let sql = ResultExport.insertStatements(table: "`t`", columns: columns, rows: [["1", "it's", "['x']", "9.90"], ["2", nil, "[]", "nan"]])
-        #expect(sql == "INSERT INTO `t` (`id`, `name`, `tags`, `price`) VALUES (1, 'it\\'s', ['x'], 9.90);\nINSERT INTO `t` (`id`, `name`, `tags`, `price`) VALUES (2, NULL, [], 'nan');")
+        #expect(sql == "INSERT INTO `t` (`id`, `name`, `tags`, `price`) VALUES (1, 'it''s', ['x'], 9.90);\nINSERT INTO `t` (`id`, `name`, `tags`, `price`) VALUES (2, NULL, [], 'nan');")
     }
 
     @Test func hexDump() {

@@ -34,7 +34,7 @@ struct MCPIntegrationTests {
         #expect(families["daily_revenue_mv"] == "materialized_view")
         #expect(families["country_dict"] == "dictionary")
 
-        let describe = try await process.call(id: 5, "describe_table", ["database": "shop", "table": "events", "include_ddl": false])
+        let describe = try await process.call(id: 5, "describe_table", ["database": "shop", "table": "events"])
         #expect(describe["sorting_key"] == .string("event_type, user_id, event_time"))
         #expect(describe["skipping_indexes"]?.arrayValue?.count == 2)
         #expect(describe["columns"]?.arrayValue?.contains { $0["name"] == .string("payload") && $0["ttl"] != nil } == true)
@@ -86,6 +86,18 @@ struct MCPIntegrationTests {
         let audit = try String(contentsOf: process.directory.appendingPathComponent("mcp-audit.jsonl"), encoding: .utf8)
         #expect(audit.contains("\"tool\":\"run_query\""))
         #expect(!audit.contains(ITEnvironment.password))
+    }
+
+    /// Review (A): the MCP server refuses read-only AI tools for a privileged user unless the connection allows it.
+    @Test func privilegedUserIsRefusedByDefault() async throws {
+        let process = try MCPProcess(access: .readOnly, allowPrivilegedUser: false)
+        defer { process.terminate() }
+        _ = try await process.request(["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["protocolVersion": "2025-03-26"]])
+        let response = try await process.request(["jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                                  "params": ["name": "list_tables", "arguments": ["database": "shop"]]])
+        #expect(response["result"]?["isError"] == .bool(true))
+        let text = response["result"]?["content"]?[0]?["text"]?.stringValue ?? ""
+        #expect(text.contains("who holds") && text.contains("SELECT grants only"), "\(text)") // ALL on 22.8, the expanded list later
     }
 
     @Test func readWriteProfileCanExecute() async throws {
@@ -140,12 +152,13 @@ final class MCPProcess: @unchecked Sendable {
     private var buffer = Data()
     private var messages: [JSONValue] = []
 
-    init(access: MCPAccess) throws {
+    /// `allowPrivilegedUser`: the test user (ccinn) holds ALL, which read-only AI access refuses unless allowed.
+    init(access: MCPAccess, allowPrivilegedUser: Bool = true) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("ccinnch-mcp-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let configuration = ITEnvironment.configuration()
         let profile = ConnectionProfile(name: "IT", host: configuration.endpoint.host, port: configuration.endpoint.port, username: ITEnvironment.user,
-                                        defaultDatabase: "shop", connectTimeout: 30, mcpAccess: access)
+                                        defaultDatabase: "shop", connectTimeout: 30, mcpAccess: access, mcpAllowPrivilegedUser: allowPrivilegedUser)
         try ProfileRepository(directory: directory, secrets: InMemorySecretStore()).save([profile])
 
         process.executableURL = Self.binary

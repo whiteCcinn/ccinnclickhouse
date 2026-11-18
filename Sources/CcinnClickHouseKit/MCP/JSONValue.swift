@@ -127,6 +127,18 @@ public enum JSONValue: Sendable, Hashable {
         output += "\""
     }
 
+    // MARK: Transforms
+
+    /// The same value with `transform` applied to every string value, at any depth (object keys stay).
+    public func mappingStrings(_ transform: (String) -> String) -> JSONValue {
+        switch self {
+        case let .string(value): .string(transform(value))
+        case let .array(values): .array(values.map { $0.mappingStrings(transform) })
+        case let .object(members): .object(members.mapValues { $0.mappingStrings(transform) })
+        case .null, .bool, .int, .double: self
+        }
+    }
+
     // MARK: Access
 
     public subscript(key: String) -> JSONValue? {

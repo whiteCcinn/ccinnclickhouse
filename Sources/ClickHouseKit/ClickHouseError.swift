@@ -64,6 +64,7 @@ public struct ClickHouseError: Error, LocalizedError, Sendable, Equatable, Custo
         public static let sessionIsLocked = 373
         public static let invalidSessionTimeout = 374
         public static let queryWasCancelled = 394
+        public static let settingConstraintViolation = 452
         public static let queryWithSameIDIsAlreadyRunning = 216
         public static let accessDenied = 497
     }

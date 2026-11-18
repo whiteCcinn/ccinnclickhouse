@@ -59,6 +59,25 @@ struct RequestBuilderTests {
         #expect(query.hasSuffix("enable_http_compression=0"))
     }
 
+    /// Review: a profile can switch the dialect (polyglot/postgresql reads `'\'` as a whole string) or set an implicit
+    /// table. Read-only requests send the safe values where settings may be sent at all.
+    @Test func readOnlyRequestsForceTheParserSettings() throws {
+        let readOnly = RequestBuilder(configuration: configuration(port: 8123, readOnly: true), baseURL: base, capabilities: ConnectionCapabilities())
+        let query = try readOnly.request(sql: "SELECT 1", queryID: "q", options: QueryOptions()).url.query ?? ""
+        #expect(query.contains("&dialect=clickhouse") && query.contains("&implicit_table_at_top_level=&") && query.contains("&implicit_select=0")
+                && query.contains("&polyglot_dialect=&") && query.contains("&enable_json_ast_dialect=0"), "\(query)")
+        let perRequest = RequestBuilder(configuration: configuration(port: 8123), baseURL: base, capabilities: ConnectionCapabilities())
+        let mcp = try perRequest.request(sql: "SELECT 1", queryID: "q", options: QueryOptions(readOnly: true)).url.query ?? ""
+        #expect(mcp.contains("&dialect=clickhouse"), "MCP asks per request")
+        let writable = try perRequest.request(sql: "SELECT 1", queryID: "q", options: QueryOptions()).url.query ?? ""
+        #expect(!writable.contains("dialect") && !writable.contains("implicit_table"))
+        // 22.8 has neither setting; a readonly=1 profile allows no setting at all: then only the verification holds.
+        let old = RequestBuilder(configuration: configuration(port: 8123, readOnly: true), baseURL: base,
+                                 capabilities: ConnectionCapabilities(unsupportedSettings: Set(ParserSettings.verified.map(\.name))))
+        let oldQuery = try old.request(sql: "SELECT 1", queryID: "q", options: QueryOptions()).url.query ?? ""
+        #expect(!oldQuery.contains("dialect") && !oldQuery.contains("implicit_table"))
+    }
+
     @Test func largeBodiesAreGzipped() throws {
         let builder = RequestBuilder(configuration: configuration(port: 8123), baseURL: base, capabilities: ConnectionCapabilities())
         let sql = "INSERT INTO t VALUES " + String(repeating: "(1, 'abc'),", count: 10_000) + "(2, 'x')"
@@ -494,6 +513,60 @@ struct ReadOnlyEnforcementTests {
         await writable.close()
     }
 
+    /// Review: a profile that pins `dialect = 'polyglot'` with readonly=1 (no setting may be sent) refuses the read-only
+    /// connection; one that only constrains the forced setting gets it verified instead of sent.
+    @Test(arguments: [["dialect": "polyglot"], ["implicit_table_at_top_level": "system.query_log"], ["implicit_select": "1"],
+                      ["polyglot_dialect": "postgresql"], ["enable_json_ast_dialect": "1"]])
+    func parserSettingsOfTheProfileRefuseReadOnlyConnections(profile: [String: String]) async throws {
+        let server = try await FakeClickHouseServer { request in
+            if request.parameters.keys.contains(where: { !["query_id", "default_format", "wait_end_of_query"].contains($0) }) {
+                return .exception(code: 164, name: "READONLY", message: "Cannot modify 'readonly' setting in readonly mode")
+            }
+            if request.sql.contains("version() AS version") { return .tsv(Self.probe(readonly: "1")) }
+            if request.sql == ParserSettings.query { return .tsv(FakeAnswers.settings(request, readonly: "1", profile: profile)) }
+            return FakeAnswers.standard(request) ?? .empty()
+        }
+        defer { server.stop() }
+        do {
+            _ = try await ClickHouseClient.connect(configuration(port: server.port, readOnly: true))
+            Issue.record("a profile with \(profile) must not give a read-only connection")
+        } catch let error as ClickHouseError {
+            #expect(error.kind == .readOnlyNotEnforced && error.message.contains(profile.keys.first ?? "?"), "\(error.message)")
+        }
+    }
+
+    /// 22.8 knows none of the parser settings: a read-write connection learns that at connect too, because its read-only
+    /// requests (MCP run_query on a read-write profile) would send them.
+    @Test func parserSettingsAServerLacksAreLearnedOnEveryConnection() async throws {
+        let server = try await FakeClickHouseServer { request in
+            if let name = ParserSettings.verified.first(where: { request.parameters[$0.name] != nil })?.name {
+                return .exception(code: 115, name: "UNKNOWN_SETTING", message: "Unknown setting \(name)")
+            }
+            return FakeAnswers.standard(request) ?? .tsv("x\nUInt8\n1\n")
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port))
+        defer { Task { await client.close() } }
+        #expect(client.capabilities.unsupportedSettings.isSuperset(of: ParserSettings.verified.map(\.name)))
+        let result = try await client.run("SELECT 1 AS x", options: QueryOptions(readOnly: true))
+        #expect(result.rows == [["1"]])
+    }
+
+    @Test func aConstrainedParserSettingIsVerifiedInsteadOfSent() async throws {
+        let server = try await FakeClickHouseServer { request in
+            if request.parameters["dialect"] != nil {
+                return .exception(code: 452, name: "SETTING_CONSTRAINT_VIOLATION", message: "Setting dialect should not be changed")
+            }
+            if request.sql.contains("version() AS version") { return .tsv(Self.probe(readonly: request.parameters["readonly"] ?? "0")) }
+            return FakeAnswers.standard(request) ?? .empty()
+        }
+        defer { server.stop() }
+        let client = try await ClickHouseClient.connect(configuration(port: server.port, readOnly: true))
+        defer { Task { await client.close() } }
+        #expect(client.capabilities.unsupportedSettings.contains("dialect") && !client.capabilities.settingsLocked)
+        #expect(await client.readOnlyRequestPathRefusal() == nil)
+    }
+
     @Test func unknownLevelFailsClosed() async throws {
         let server = try await FakeClickHouseServer { request in
             if request.sql.contains("getSetting") { return .exception(code: 46, name: "UNKNOWN_FUNCTION", message: "Unknown function getSetting") }
@@ -702,6 +775,7 @@ struct ReadonlyTwoUserTests {
             return .exception(code: 164, name: "READONLY", message: "Cannot modify 'readonly' setting in readonly mode")
         }
         if request.sql.contains("version() AS version") { return .tsv(ReadOnlyEnforcementTests.probe(readonly: "2")) }
+        if request.sql == ParserSettings.query { return .tsv(FakeAnswers.settings(request, readonly: "2")) }
         if let answer = FakeAnswers.standard(request) { return answer }
         return .tsv("x\nUInt8\n1\n")
     }
@@ -846,5 +920,38 @@ struct NumericSafetyTests {
         settings.connectTimeout = .nan
         let client = try await ClickHouseClient.connect(settings)
         await client.close()
+    }
+}
+
+@Suite("Parser settings of the read-only path")
+struct ParserSettingsTests {
+    @Test func safeValuesAndMissingSettingsPass() {
+        #expect(ParserSettings.refusal(["readonly": "1", "dialect": "clickhouse", "implicit_table_at_top_level": "", "implicit_select": "0",
+                                        "polyglot_dialect": "", "enable_json_ast_dialect": "0"]) == nil)
+        #expect(ParserSettings.refusal(["readonly": "2"]) == nil, "22.8 has none of them: their defaults")
+    }
+
+    @Test(arguments: [["dialect": "polyglot"], ["dialect": "kusto"], ["implicit_table_at_top_level": "system.query_log"], ["implicit_select": "1"],
+                      ["polyglot_dialect": "postgresql"], ["enable_json_ast_dialect": "1"]])
+    func unsafeValuesRefuse(change: [String: String]) {
+        let values = ["readonly": "1"].merging(change) { $1 }
+        let refusal = ParserSettings.refusal(values)
+        #expect(refusal?.contains(change.keys.first ?? "?") == true, "\(refusal ?? "nil")")
+    }
+
+    @Test func unreadableOrUnenforcedFailsClosed() {
+        #expect(ParserSettings.refusal([:]) != nil, "the readonly row proves the table was read")
+        #expect(ParserSettings.refusal(["readonly": "0"]) != nil)
+        #expect(ParserSettings.refusal(["readonly": "x"]) != nil)
+    }
+
+    @Test func classification() {
+        for name in ["dialect", "polyglot_dialect", "implicit_select", "implicit_table_at_top_level", "enable_json_ast_dialect",
+                     "allow_experimental_prql_dialect"] {
+            #expect(ParserSettings.mayAffectParsing(name: name, description: ""), "\(name)")
+        }
+        #expect(ParserSettings.mayAffectParsing(name: "max_parser_depth", description: "Limits maximum recursion depth in the recursive descent parser."))
+        #expect(!ParserSettings.mayAffectParsing(name: "max_threads", description: "The maximum number of query processing threads."))
+        for expectation in ParserSettings.verified { #expect(!ParserSettings.reviewed.contains(expectation.name)) }
     }
 }

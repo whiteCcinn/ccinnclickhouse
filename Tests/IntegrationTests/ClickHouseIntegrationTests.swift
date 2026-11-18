@@ -48,7 +48,8 @@ struct ClickHouseIntegrationTests {
         #expect(client.serverInfo.version != nil)
         #expect(client.serverInfo.currentUser == ITEnvironment.user)
         #expect(!client.capabilities.settingsLocked)
-        #expect(client.capabilities.unsupportedSettings.isEmpty)
+        // Only parser settings an older server lacks (22.8 has none, 24.8 only `dialect`) are dropped.
+        #expect(client.capabilities.unsupportedSettings.isSubset(of: ParserSettings.verified.map(\.name)), "\(client.capabilities.unsupportedSettings)")
         #expect(client.systemSchema.has("tables", column: "engine"))
         print("live server: \(client.serverInfo.versionString) tz=\(client.serverInfo.timeZone ?? "-") node=\(client.serverInfo.displayName ?? "-")")
     }

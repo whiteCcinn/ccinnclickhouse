@@ -116,7 +116,8 @@ struct CompletionTests {
         #expect(CompletionEngine.quoteIfNeeded("select") == "`select`")
         #expect(CompletionEngine.quoteIfNeeded("my table") == "`my table`")
         #expect(CompletionEngine.quoteIfNeeded("") == "``")
-        #expect(CompletionEngine.splitWords("groupUniqArray").map(String.init) == ["group", "Uniq", "Array"])
+        let parts: [String] = CompletionEngine.splitWords("groupUniqArray").map { String($0) }
+        #expect(parts == ["group", "Uniq", "Array"])
     }
 
     @Test func fuzzNeverTraps() {

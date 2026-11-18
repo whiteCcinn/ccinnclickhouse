@@ -53,6 +53,9 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
     public var connectTimeout: Double
     /// AI access through the MCP server (off unless the user opts in).
     public var mcpAccess: MCPAccess
+    /// Read-only AI access also for a ClickHouse user with more than SELECT grants (sources, SYSTEM, access management,
+    /// ALL): off by default, because readonly=1 does not stop those (see `MCPPrivilegeReport`).
+    public var mcpAllowPrivilegedUser: Bool
     public var createdAt: Date
     public var lastConnectedAt: Date?
 
@@ -60,7 +63,7 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
                 username: String = "default", defaultDatabase: String? = nil, defaultCluster: String? = nil, compression: Bool = true,
                 readOnly: Bool = false, customCACertificate: String? = nil, skipTLSVerification: Bool = false, color: ProfileColor = .none,
                 isFavorite: Bool = false, ssh: SSHTunnelConfiguration? = nil, confirmMutations: Bool = false, connectTimeout: Double = 10,
-                mcpAccess: MCPAccess = .disabled, createdAt: Date = Date(), lastConnectedAt: Date? = nil) {
+                mcpAccess: MCPAccess = .disabled, mcpAllowPrivilegedUser: Bool = false, createdAt: Date = Date(), lastConnectedAt: Date? = nil) {
         self.id = id
         self.name = name
         self.host = host
@@ -80,6 +83,7 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
         self.confirmMutations = confirmMutations
         self.connectTimeout = connectTimeout
         self.mcpAccess = mcpAccess
+        self.mcpAllowPrivilegedUser = mcpAllowPrivilegedUser
         self.createdAt = createdAt
         self.lastConnectedAt = lastConnectedAt
     }
@@ -106,6 +110,7 @@ public struct ConnectionProfile: Codable, Identifiable, Hashable, Sendable {
         confirmMutations = try container.decodeIfPresent(Bool.self, forKey: .confirmMutations) ?? false
         connectTimeout = try container.decodeIfPresent(Double.self, forKey: .connectTimeout) ?? 10
         mcpAccess = (try? container.decodeIfPresent(MCPAccess.self, forKey: .mcpAccess)) ?? .disabled
+        mcpAllowPrivilegedUser = (try? container.decodeIfPresent(Bool.self, forKey: .mcpAllowPrivilegedUser)) ?? false
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         lastConnectedAt = try container.decodeIfPresent(Date.self, forKey: .lastConnectedAt)
     }

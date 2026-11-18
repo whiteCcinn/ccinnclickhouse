@@ -384,6 +384,30 @@ struct FormatterIntegrationTests {
         #expect(calls >= 9, "\(client.serverInfo.versionString): the dotted shapes call file()")
     }
 
+    /// Review: AutoLimit's rewrite. 1.2.0 checked the statement, then sent it with ` LIMIT n` inserted after a bare `#`
+    /// (a `# ` comment then hid the `/*` the guard trusted) or a lone `$` (a heredoc then swallowed the inserted text).
+    /// The server really runs the hidden `file()` call of those texts; the guard refuses the statements, the texts
+    /// 1.2.0 sent, and `prepare` refuses them for every limit.
+    @Test func autoLimitRewritesAreGuardedAsSent() async throws {
+        let client = try await ITEnvironment.connect(readOnly: true)
+        defer { Task { await client.close() } }
+        let call = "file('ccinn_no_such_file', 'LineAsString')"
+        let cases = [
+            ("SELECT 1 #/*\n, \(call) -- */", "SELECT 1 # LIMIT 101/*\n, \(call) -- */", true),
+            ("SELECT 1 #FORMAT TSV /*\n, \(call) -- */", "SELECT 1 # LIMIT 101 FORMAT TSV /*\n, \(call) -- */", true),
+            ("SELECT 1, $/*Q$ $ LIMIT 101/*Q$, \(call) -- */ */", "SELECT 1, $ LIMIT 101/*Q$ $ LIMIT 101/*Q$, \(call) -- */ */",
+             client.serverInfo.version?.isAtLeast(26, 1) != true), // 26.8 accepts only word-character heredoc tags
+        ]
+        for (original, sent, serverCalls) in cases {
+            #expect(await callsFile(client, sent) == serverCalls, "\(client.serverInfo.versionString): \(sent.debugDescription)")
+            #expect(ReadOnlySQLGuard.check(original) != nil, "\(original.debugDescription)")
+            #expect(ReadOnlySQLGuard.check(sent) != nil, "\(sent.debugDescription)")
+            for limit in [101, 1_000] {
+                if case .success = ReadOnlySQLGuard.prepare(original, autoLimit: limit) { Issue.record("prepared: \(original.debugDescription)") }
+            }
+        }
+    }
+
     /// Review: `//` is a line comment on every server; what the guard allows after it, the server reads alike.
     @Test func doubleSlashCommentsReadAlike() async throws {
         let client = try await ITEnvironment.connect()

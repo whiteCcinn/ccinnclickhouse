@@ -393,6 +393,15 @@ final class SQLTabModel {
                 outcomes = [outcome]
                 return
             }
+            // A read-only batch runs only while the request path parses ClickHouse SQL with readonly applied: a profile
+            // can switch the dialect or add an implicit table at any time (ParserSettings).
+            if workspace.client.configuration.readOnly, let refusal = await workspace.client.readOnlyRequestPathRefusal() {
+                let outcome = StatementOutcome(index: 0, sql: texts.first ?? "", executedSQL: texts.first ?? "", kind: SQLStatementKind.of(texts.first ?? ""))
+                outcome.errorMessage = "This connection is read-only. \(refusal)"
+                outcome.isRunning = false
+                outcomes = [outcome]
+                return
+            }
             let mutations = texts.filter { SQLStatementKind.of($0).isMutation }
             if workspace.profile.confirmMutations, !mutations.isEmpty {
                 let confirmed = await withCheckedContinuation { continuation in
@@ -419,7 +428,24 @@ final class SQLTabModel {
         var executed = sql
         var limitApplied: Int?
         var mapping = SQLExecutedTextMapping(prefixLength: statement.prefixLength)
-        if kind == .query, autoLimit > 0 {
+        if workspace.client.configuration.readOnly {
+            // A read-only connection: the exact text sent (with the automatic LIMIT) is what the guard checks.
+            switch ReadOnlySQLGuard.prepare(sql, autoLimit: kind == .query && autoLimit > 0 ? autoLimit : nil) {
+            case let .success(prepared):
+                executed = prepared.text
+                if let outcome = prepared.limit {
+                    limitApplied = autoLimit
+                    mapping.insertion = outcome.insertion
+                }
+            case let .failure(refusal):
+                let refused = StatementOutcome(index: index, sql: sql, executedSQL: sql, kind: kind)
+                refused.errorMessage = "This connection is read-only. \(refusal.reason)"
+                refused.isRunning = false
+                outcomes.append(refused)
+                selectedOutcomeID = refused.id
+                return false
+            }
+        } else if kind == .query, autoLimit > 0 {
             let outcome = AutoLimit.apply(to: sql, limit: autoLimit)
             if outcome.applied {
                 executed = outcome.sql

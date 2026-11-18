@@ -1,3 +1,4 @@
+import ClickHouseKit
 import Foundation
 import Network
 import os
@@ -233,11 +234,24 @@ enum FakeAnswers {
     static let probe = "version\ttimezone\tuser\thost\tuptime\tdatabase\treadonly\nString\tString\tString\tString\tUInt32\tString\tString\n24.8.14.39\tUTC\tccinn\tnode-1\t1234\tdefault\t0\n"
     static let schema = "table\tname\nString\tString\nprocesses\tquery_id\nprocesses\tread_rows\nprocesses\telapsed\ntables\tname\n"
 
+    /// system.settings rows for `ParserSettings.query`: readonly, and the parser settings as the request sent them (else
+    /// their safe defaults, or `profile` overrides).
+    static func settings(_ request: FakeClickHouseServer.Request, readonly: String, profile: [String: String] = [:]) -> String {
+        var rows = "name\tvalue\nString\tString\nreadonly\t\(readonly)\n"
+        for expectation in ParserSettings.verified {
+            let value = request.parameters[expectation.name] ?? profile[expectation.name] ?? expectation.value
+            rows += "\(expectation.name)\t\(value)\n"
+        }
+        return rows
+    }
+
     /// Answers probe and schema requests; returns nil for anything else.
     static func standard(_ request: FakeClickHouseServer.Request) -> FakeClickHouseServer.Response? {
         if request.sql.contains("version() AS version") { return .tsv(probe) }
         if request.sql.contains("FROM system.columns WHERE database = 'system'") { return .tsv(schema) }
         if request.sql.hasPrefix("KILL QUERY") { return .tsv("kill_status\tquery_id\nString\tString\n") }
+        // The read-only path check (ParserSettings): the readonly level the request asked for, the parser settings as sent.
+        if request.sql == ParserSettings.query { return .tsv(settings(request, readonly: request.parameters["readonly"] ?? "0")) }
         return nil
     }
 }

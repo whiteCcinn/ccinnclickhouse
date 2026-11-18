@@ -302,6 +302,12 @@ struct ConnectionEditorView: View {
                             Text(mcpHint)
                                 .font(.caption)
                                 .foregroundStyle(draft.mcpAccess == .readWrite ? Color.orange : Color.secondary)
+                            if draft.mcpAccess == .readOnly {
+                                Toggle("Allow a ClickHouse user with more than SELECT grants (not recommended)", isOn: $draft.mcpAllowPrivilegedUser)
+                                Text("Read-only AI tools check this user's grants when they connect. A user with SOURCES (file(), url(), remote() …), SYSTEM, access management or ALL is refused unless this is on: readonly=1 does not stop those.")
+                                    .font(.caption)
+                                    .foregroundStyle(draft.mcpAllowPrivilegedUser ? Color.orange : Color.secondary)
+                            }
                         } header: {
                             Text("AI access")
                         }

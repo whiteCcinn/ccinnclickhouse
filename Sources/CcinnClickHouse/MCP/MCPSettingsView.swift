@@ -41,7 +41,7 @@ struct MCPSettingsView: View {
                         }
                     }
                 }
-                Text("Read-only allows the metadata tools and SELECT / SHOW / DESCRIBE / EXISTS / EXPLAIN, enforced by ClickHouse with readonly=1 (checked when connecting; refused through proxies that drop it) and by the app, at most 1,000 rows per call. Read & write adds a tool that runs any statement. Every call is logged to mcp-audit.jsonl in the app's data folder.")
+                Text("Read-only allows the metadata tools and SELECT / SHOW / DESCRIBE / EXISTS / EXPLAIN, enforced by ClickHouse with readonly=1 (checked when connecting; refused through proxies that drop it) and by the app, at most 1,000 rows per call. It needs a ClickHouse user with SELECT grants only: a user with SOURCES, SYSTEM, access management or ALL is refused unless the connection allows it. Read & write adds a tool that runs any statement. Every call is logged to mcp-audit.jsonl in the app's data folder.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -256,6 +256,136 @@ struct MCPToolTests {
         #expect(await tools.call(name: "no_such_tool", arguments: [:]).isError)
     }
 
+    /// Review: the AutoLimit `#` and `$` repros, and reads of other sessions' SQL, are refused through run_query and
+    /// explain_query before any connection is opened (the registry here would fail with "offline").
+    @Test func smugglingAndSensitiveSourcesAreRefusedBeforeConnecting() async {
+        let tools = makeTools([Self.profiles[0]])
+        let sqls = GuardedWireTextTests.repros + ["SELECT query FROM system.query_log", "SHOW PROCESSLIST", "SELECT * FROM system.users",
+                                                  "SHOW CREATE TABLE shop.events", "SHOW TABLE shop.events", "SELECT create_table_query FROM system.tables",
+                                                  "SELECT * FROM (EXPLAIN SYNTAX SELECT * FROM shop.v)", "SELECT count() FROM `\\x73ystem`.query_log"]
+        for tool in ["run_query", "explain_query"] {
+            for sql in sqls {
+                let result = await tools.call(name: tool, arguments: ["sql": .string(sql)])
+                #expect(result.isError, "\(tool) \(sql.debugDescription)")
+                #expect(result.payload.stringValue?.contains("offline") == false, "\(tool) \(sql.debugDescription): refused before connecting")
+            }
+        }
+        let inSystem = await tools.call(name: "run_query", arguments: ["sql": "SELECT query FROM query_log", "database": "system"])
+        #expect(inSystem.isError && inSystem.payload.stringValue?.contains("offline") == false)
+        let syntax = await tools.call(name: "explain_query", arguments: ["sql": "SELECT * FROM shop.v", "kind": "syntax"])
+        #expect(syntax.isError && syntax.payload.stringValue?.contains("offline") == false, "EXPLAIN SYNTAX inlines view queries")
+        let ddl = await tools.call(name: "describe_table", arguments: ["database": "shop", "table": "events", "include_ddl": true])
+        #expect(ddl.isError && ddl.payload.stringValue?.contains("include_ddl") == true, "describe_table offers no DDL")
+    }
+
+    /// Cross-port rule: an argument other than `sql` holding a control character (Unicode Cc: NUL, C0, DEL, C1) is refused
+    /// before anything is sent. A writer or quoting step that drops NUL would make the server read another name than
+    /// the one checked (MySQL received information_schema for `information_schema\0x`).
+    @Test func controlCharactersInNamesAreRefusedBeforeConnecting() async {
+        for value in ["sys\0tem", "shop\u{1}", "shop\u{7F}", "shop\u{85}", "shop\u{9F}", "shop\n", "\tshop"] {
+            for key in ["connection", "database", "table", "name_filter", "user"] {
+                #expect(Arguments([key: .string(value), "sql": .string("SELECT 1")]).controlCharacterArgument() == key, "\(key) \(value.debugDescription)")
+            }
+        }
+        #expect(Arguments(["sql": .string("SELECT\t1\n FROM t"), "database": .string("shop"), "limit": .int(5)]).controlCharacterArgument() == nil)
+        #expect(Arguments(["database": .string("名前 café")]).controlCharacterArgument() == nil)
+        let tools = makeTools([Self.profiles[0]])
+        for (tool, arguments) in [("describe_table", ["database": JSONValue.string("sys\0tem"), "table": "processes"]),
+                                  ("list_tables", ["database": "information_schema\0x"]),
+                                  ("run_query", ["sql": "SELECT 1", "database": "sys\0tem"])] {
+            let result = await tools.call(name: tool, arguments: arguments)
+            #expect(result.isError && result.payload.stringValue?.contains("control character") == true, "\(tool): \(result.payload.stringValue ?? "")")
+        }
+    }
+
+    /// Defence in depth: every string of a tool result has its credentials masked, and EXPLAIN results their quoted
+    /// strings (26.8 plans print the literals of the views a query reads).
+    @Test func toolResultsAreMasked() {
+        let result: JSONValue = ["rows": [["CREATE VIEW v AS SELECT * FROM url('http://u:zzurlsecret@h/x', CSV)", 42], ["password=zzpairsecret"]],
+                                 "nested": ["ddl": "ENGINE = MySQL('h:3306', 'db', 't', 'u', 'zzmysqlsecret')"], "count": 2]
+        let maskedValue = ClickHouseMCPTools.maskingSecrets(result)
+        let masked = maskedValue.serialized()
+        for secret in ["zzurlsecret", "zzpairsecret", "zzmysqlsecret"] { #expect(!masked.contains(secret), "\(secret) in \(masked)") }
+        #expect(masked.contains("42") && masked.contains("\"count\":2"))
+        // The AI learns that values were altered, and how many.
+        #expect(maskedValue["masked"] == .int(4), "\(masked)")
+        let clean: JSONValue = ["rows": [["ssh://git@github.com:22/x", "PRIMARY KEY 'id'"], ["s3('a','b','c')"]]]
+        #expect(ClickHouseMCPTools.maskingSecrets(clean) == clean, "legitimate data is unchanged and not flagged")
+        // The echoed statement is masked but not counted: `masked` counts altered result values only.
+        let echoed = ClickHouseMCPTools.maskingSecrets(["statement": "SELECT 'http://u:zzpw@h/x'", "rows": [["plain"]]])
+        #expect(echoed["masked"] == nil && echoed["statement"]?.stringValue?.contains("zzpw") == false, "\(echoed.serialized())")
+        let plan = ClickHouseMCPTools.maskingPlanLiterals(["rows": [["Filter column: notEquals(s, 'zzwheresecret')"], ["Granules: 3/10"]]])
+        #expect(JSONValue.object(plan).serialized() == #"{"rows":[["Filter column: notEquals(s, '?')"],["Granules: 3/10"]]}"#)
+    }
+
+    /// Review (A): what `SHOW GRANTS` (recorded from 22.8 and 26.8) says a user may do beyond reading tables. No text
+    /// guard stops a privileged account (file(), url(), SYSTEM, access management), so such users get no read-only AI
+    /// access unless the connection opts in.
+    @Test func privilegeReportsFromRecordedGrants() {
+        let admin228 = MCPPrivilegeReport(grants: ["GRANT ALL ON *.* TO ccinn WITH GRANT OPTION"])
+        #expect(admin228.risks == [.all, .grantOption])
+        let reader228 = MCPPrivilegeReport(grants: [
+            "GRANT SHOW, SELECT, INSERT, ALTER, CREATE, DROP, TRUNCATE, OPTIMIZE, BACKUP, KILL QUERY, KILL TRANSACTION, MOVE PARTITION BETWEEN SHARDS, SYSTEM, dictGet, INTROSPECTION, SOURCES, CLUSTER ON *.* TO reader",
+        ])
+        #expect(reader228.risks == [.sources, .system, .introspection])
+        let reader268 = MCPPrivilegeReport(grants: [
+            "GRANT SOURCES ON *.* TO reader", "GRANT TABLE ENGINE ON * TO reader",
+            "GRANT CHECK, SHOW, SELECT, INSERT, SHOW HANDLERS, SYSTEM, dictGet, displaySecretsInShowAndSelect, INTROSPECTION, CLUSTER, FILE, URL, REMOTE, S3, AI FUNCTIONS ON *.* TO reader",
+            "GRANT SET DEFINER ON * TO reader",
+        ])
+        #expect(reader268.risks == [.sources, .system, .accessManagement, .introspection])
+        let admin268 = MCPPrivilegeReport(grants: ["GRANT CREATE USER, ALTER USER, DROP USER, CREATE ROLE, ALTER ROLE, DROP ROLE, IMPERSONATE ON * TO ccinn WITH GRANT OPTION"])
+        #expect(admin268.risks == [.accessManagement, .grantOption])
+        // A plain SELECT user, with column lists and quoted names.
+        let plain = MCPPrivilegeReport(grants: ["GRANT SELECT ON shop.* TO ai_reader", "GRANT SELECT(a, b) ON `my db`.`t, ON` TO ai_reader",
+                                                "GRANT SHOW TABLES ON shop.* TO ai_reader"])
+        #expect(plain.isPlain)
+        // Roles hide their privileges from SHOW GRANTS: not provably plain.
+        #expect(MCPPrivilegeReport(grants: ["GRANT SELECT ON shop.* TO u", "GRANT analysts TO u"]).risks == [.roles])
+        #expect(MCPPrivilegeReport(grants: ["GRANT SYSTEM RELOAD DICTIONARY ON *.* TO u"]).risks == [.system])
+        #expect(MCPPrivilegeReport(grants: ["GRANT NAMED COLLECTION ON c TO u"]).risks == [.accessManagement])
+        #expect(MCPPrivilegeReport(grants: ["GRANT EXECUTABLE ON *.* TO u"]).risks == [.sources])
+        #expect(MCPPrivilegeReport(grants: ["REVOKE SELECT ON secret.* FROM u", "GRANT SELECT ON *.* TO u"]).isPlain)
+        // Nothing to read is not "plain": fail closed.
+        #expect(MCPPrivilegeReport(failure: "boom").risks == [.unknown("boom")])
+    }
+
+    /// Review (C): individual AI grants (`GRANT aiGenerate ON *.*`) were rated plain; only the AI FUNCTIONS group was
+    /// flagged. A privilege is risky when it or any ancestor in system.privileges is, so a future child of a risky group
+    /// is covered; a privilege the hierarchy does not know is risky.
+    @Test func privilegesAreJudgedWithTheirAncestors() {
+        #expect(MCPPrivilegeReport(grants: ["GRANT aiGenerate ON *.* TO u"]).risks == [.sources])
+        #expect(MCPPrivilegeReport(grants: ["GRANT AITRANSLATE, SELECT ON *.* TO u"]).risks == [.sources])
+        #expect(MCPPrivilegeReport(grants: ["GRANT SHOW USERS ON *.* TO u"]).risks == [.accessManagement])
+        #expect(MCPPrivilegeReport(grants: ["GRANT SHOW NAMED COLLECTIONS SECRETS ON * TO u"]).risks == [.accessManagement])
+        #expect(MCPPrivilegeReport(grants: ["GRANT SYSTEM FLUSH LOGS ON *.* TO u"]).risks == [.system])
+        #expect(MCPPrivilegeReport(grants: ["GRANT addressToLine ON *.* TO u"]).risks == [.introspection])
+        #expect(MCPPrivilegeReport(grants: ["GRANT dictGet, SHOW TABLES, SELECT, CREATE TEMPORARY TABLE ON *.* TO u"]).isPlain)
+        #expect(MCPPrivilegeReport(grants: ["GRANT SOMETHING NEW ON *.* TO u"]).risks == [.unknown("“SOMETHING NEW” is not a privilege this server's hierarchy knows")])
+        // The server's own hierarchy (system.privileges rows): a child the pinned list never saw inherits its group's risk.
+        let live = PrivilegeHierarchy(rows: [["ALL", "[]", nil], ["SOURCES", "[]", "ALL"], ["LAKEHOUSE", "['LAKE']", "SOURCES"], ["SELECT", "[]", "ALL"]])
+        #expect(live != nil)
+        #expect(MCPPrivilegeReport(grants: ["GRANT LAKE ON *.* TO u"], hierarchy: live ?? .pinned).risks == [.sources])
+        #expect(MCPPrivilegeReport(grants: ["GRANT SELECT ON *.* TO u"], hierarchy: live ?? .pinned).isPlain)
+        #expect(PrivilegeHierarchy(rows: [["only one column"]]) == nil)
+    }
+
+    /// Review (A): read-only AI tools refuse a privileged user unless the connection opts in; read & write is the
+    /// user's explicit choice and is not checked.
+    @Test func privilegedUsersGetNoReadOnlyAIAccessByDefault() async {
+        let profile = ConnectionProfile(name: "Prod", host: "127.0.0.1", port: 1, username: "ccinn", mcpAccess: .readOnly)
+        var allowed = profile
+        allowed.mcpAllowPrivilegedUser = true
+        let refusal = MCPPrivilegeReport(grants: ["GRANT ALL ON *.* TO ccinn"]).refusal(for: profile, user: "ccinn")
+        #expect(refusal?.contains("ccinn") == true && refusal?.contains("ALL") == true)
+        #expect(MCPPrivilegeReport(grants: ["GRANT ALL ON *.* TO ccinn"]).refusal(for: allowed, user: "ccinn") == nil)
+        #expect(MCPPrivilegeReport(grants: ["GRANT SELECT ON shop.* TO r"]).refusal(for: profile, user: "r") == nil)
+        let decoded = try? JSONDecoder().decode(ConnectionProfile.self, from: JSONEncoder().encode(allowed))
+        #expect(decoded?.mcpAllowPrivilegedUser == true)
+        let legacy = #"{"id":"7B0A9E6C-3C3A-4B8E-9C5B-1D6F2E0A4A11","name":"Old","host":"h","port":8123,"createdAt":0}"#
+        #expect((try? JSONDecoder().decode(ConnectionProfile.self, from: Data(legacy.utf8)))?.mcpAllowPrivilegedUser == false)
+    }
+
     @Test func connectionFailuresAreIsErrorResults() async {
         let result = await makeTools([Self.profiles[0]]).call(name: "list_databases", arguments: [:])
         #expect(result.isError)
