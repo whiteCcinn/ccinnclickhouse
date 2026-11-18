@@ -97,7 +97,7 @@ public enum CompletionEngine {
             if lexer.units[(token.range.lowerBound + 1)..<cursor].contains(0x24) { return .empty(at: cursor) }
         }
         if let ending = tokens.last(where: { $0.range.upperBound == cursor }) {
-            if ending.kind == .comment, lexer.text(of: ending).hasPrefix("--") || lexer.text(of: ending).hasPrefix("#") { return .empty(at: cursor) }
+            if ending.kind == .comment, ["--", "//", "#"].contains(where: lexer.text(of: ending).hasPrefix) { return .empty(at: cursor) }
             if ending.kind == .string, !isTerminated(ending, lexer: lexer) { return .empty(at: cursor) }
         }
 

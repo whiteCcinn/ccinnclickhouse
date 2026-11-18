@@ -122,6 +122,8 @@ final class SQLTabModel {
     /// Open) replaces the text, which makes every diagnostic stale.
     var text: String {
         didSet {
+            // A format computed for the old text no longer applies.
+            formatRunner.textDidChange()
             if editorEditPending {
                 editorEditPending = false
                 if lineIndexIsStale { rebuildLineIndex() }
@@ -202,6 +204,33 @@ final class SQLTabModel {
     var autoLimit: Int {
         get { UserDefaults.standard.object(forKey: "autoLimit") as? Int ?? 1000 }
         set { UserDefaults.standard.set(newValue, forKey: "autoLimit") }
+    }
+
+    // MARK: Formatting
+
+    /// Format SQL for this tab's editor; its notices show in the status line under the editor.
+    let formatRunner = SQLFormatRunner()
+    /// The editor of this tab, for edits that must be undoable (formatting).
+    var editorController: SQLEditorController { formatRunner.editor }
+    var isFormatting: Bool { formatRunner.isRunning }
+
+    /// Settings ▸ General ▸ Format SQL. Keyword case defaults to unchanged: see `SQLFormatOptions`.
+    static var formatOptions: SQLFormatOptions {
+        let defaults = UserDefaults.standard
+        let keywordCase = defaults.string(forKey: "sqlFormatKeywordCase").flatMap(SQLFormatOptions.KeywordCase.init(rawValue:)) ?? .preserve
+        let indent = defaults.object(forKey: "sqlFormatIndent") as? Int ?? 2
+        return SQLFormatOptions(keywordCase: keywordCase, indentWidth: indent)
+    }
+
+    /// Formats the selection, or the whole script when nothing is selected (⌥⌘L): see `SQLFormatRunner`.
+    func formatSQL() {
+        formatRunner.format(options: Self.formatOptions, fallback: (text, selection)) { [weak self] expected, range, replacement, newSelection in
+            // No editor yet (a tab opened from launch arguments): replace the model's text, if it is still the same.
+            guard let self, self.text.utf16.elementsEqual(expected.utf16) else { return false } // code units, not canonical equality
+            self.text = (expected as NSString).replacingCharacters(in: range, with: replacement)
+            self.selection = newSelection
+            return true
+        }
     }
 
     init(title: String, text: String, database: String?, workspace: WorkspaceModel) {

@@ -73,6 +73,24 @@ public enum ReadOnlySQLGuard {
         guard statements.count == 1 else { return "Only one statement can be run at a time; send statements separately." }
         let words = StatementWords(statement.text)
         guard let first = words.words.first else { return "The statement is empty." }
+        // A construct supported servers tokenize differently must make the guard stricter, never weaker.
+        let lexer = SQLLexer(sql)
+        let tokens = lexer.tokens()
+        if let last = tokens.last, lexer.isUnterminated(last) {
+            return "The statement has an unterminated string, quoted name or comment."
+        }
+        // Servers skip U+00A0, U+FEFF, U+200B and more as whitespace: `1,\u{FEFF}file(` calls `file()`. Refused anywhere
+        // outside strings, quoted names and comments, whatever the lexer makes of it.
+        if let invisible = lexer.invisibleCharacter(in: tokens) {
+            let code = String(invisible.scalar.value, radix: 16, uppercase: true)
+            return "The statement contains an invisible character (U+\(String(repeating: "0", count: max(0, 4 - code.count)) + code)) outside strings, quoted names and comments; ClickHouse may read it as a space."
+        }
+        if let token = lexer.uncertainToken(in: tokens) {
+            if lexer.isVersionDependentHeredoc(token) {
+                return "Heredocs with a tag other than letters, digits and `_` are read differently by ClickHouse versions (26.8 reads no string there); use `$$ … $$` or a plain tag."
+            }
+            return "`\(lexer.text(of: token))` may be read differently by the server (a malformed or version-dependent number); write it plainly."
+        }
 
         var queryStart = 0
         if first == "EXPLAIN" {

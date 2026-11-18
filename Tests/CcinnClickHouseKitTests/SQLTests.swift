@@ -49,7 +49,8 @@ struct LexerTests {
     }
 
     @Test func unterminatedInputNeverFails() {
-        for sql in ["'abc", "`abc", "/* never closed /* nested */", "$$ open", "{id:", "\"x", "0x", "1e", "--", "#"] {
+        for sql in ["'abc", "`abc", "/* never closed /* nested */", "$$ open", "{id:", "\"x", "0x", "1e", "--", "#", "0x1.", "0x1p", "1e-",
+                    ".5e+", "1_", "0b", "."] {
             let tokens = SQLLexer.tokenize(sql)
             #expect(tokens.last?.range.upperBound ?? 0 <= sql.utf16.count)
         }
@@ -257,6 +258,90 @@ struct ExternalAccessGuardTests {
     }
 }
 
+/// The shared lexer is a security boundary: whatever a supported server (22.8, 24.8, 26.8) reads as a clause or a second
+/// statement, the read-only guard must see too, or refuse. Each text below hides a SETTINGS clause, a table function, a
+/// write or a second statement behind a construct; every one is refused. Server behaviour: `FormatterIntegrationTests`.
+@Suite("Read-only guard: nothing hides behind a construct")
+struct GuardSmugglingTests {
+    @Test(arguments: [
+        // A number that starts with `.` takes no word characters: every server reads `.5` and then the keyword
+        // (1.2.0 read one number `.5settings` and let these through).
+        "SELECT 1, .5settings max_threads = 1",
+        "SELECT 1, .5SETTINGS readonly = 0",
+        "SELECT 1, .5e1settings max_execution_time = 0",
+        "SELECT 1, .5e+1settings max_memory_usage = 0",
+        "SELECT 1, .5into outfile '/tmp/x'",
+        "SELECT 1, .5from someFutureExternalSource('http://x')",
+        "SELECT (.5)settings max_threads = 1",
+        // Heredoc tags other than letters, digits and `_`: one string on 22.8/24.8, names on 26.8 (1.2.0 let these through).
+        "SELECT 1 AS $a, $a b$ SETTINGS max_threads = 1 -- $a b$",
+        "SELECT $a b$; DROP TABLE t; $a b$",
+        "SELECT 1 $x-y$; ALTER TABLE t DELETE WHERE 1 -- $x-y$",
+        "SELECT 1 $é$; INSERT INTO t VALUES (1) -- $é$",
+        "SELECT $ $; TRUNCATE TABLE t; $ $",
+        "SELECT $a.b$ x $a.b$",
+        // Comments, strings and escapes every server reads alike: a statement after them is still a second statement.
+        "SELECT 1 # c\n; DROP TABLE t",
+        "SELECT 1 #\t; DROP TABLE t",
+        "SELECT 1 /* a /* b */ c */; ALTER TABLE t DELETE WHERE 1",
+        "SELECT 1 -- c\n; INSERT INTO t VALUES (1)",
+        "SELECT 'a\\\\'; DROP TABLE t",
+        "SELECT `a\\\\`; DROP TABLE t",
+        "SELECT $t$ x $t$; INSERT INTO t VALUES (1)",
+        // Review: `//` is a line comment on every server; 1.2.0 read two `/` and a fake string after them.
+        "SELECT 1 //'\n, file('/etc/passwd') --'",
+        "SELECT 1 //'\nSETTINGS max_threads = 1 --'",
+        "SELECT * FROM numbers(1) //'\n, url('http://169.254.169.254/') --'",
+        "SELECT 1 //\n; DROP TABLE t",
+        // Review: servers skip U+FEFF, U+00A0, U+200B, … as whitespace; 1.2.0 glued them to the next word.
+        "SELECT 1,\u{FEFF}file('/etc/passwd')",
+        "SELECT * FROM\u{A0}url('http://169.254.169.254/', 'RawBLOB')",
+        "SELECT * FROM numbers(1),\u{200B}remote('h', system.one)",
+        "SELECT 1\u{2060}SETTINGS max_threads = 1",
+        "SELECT 1 FROM\u{3000}someFutureExternalSource('x')",
+        "SELECT 1,\u{200E}file('x')",
+        "SELECT 1,\u{85}file('x')",
+        "SELECT 1,\u{1F}file('x')",
+        "SELECT 1,\u{E0020}file('x')",
+        // Review #3: after a dot servers read digits and word characters only, so a sign is an operator.
+        "SELECT t.1e-file('nonexistent.txt') FROM (SELECT 1 AS `1e`) AS t",
+        "SELECT t.1e+file('nonexistent.txt') FROM (SELECT 1 AS `1e`) AS t",
+        "SELECT t . 12abc-file('x') FROM t",
+        "SELECT t./**/0x1p-url('http://x') FROM t",
+        "SELECT 0b.5e-file('x')",
+        "SELECT 1e-file('x')",
+        "SELECT 1, .5e-file('x')",
+        "SELECT 1, .5e+settings",
+        "SELECT 1e2; DROP TABLE t",
+        "SELECT 0x.5; DROP TABLE t",
+        "SELECT 1 /* open; DROP TABLE t",
+    ])
+    func refused(sql: String) {
+        #expect(ReadOnlySQLGuard.check(sql) != nil, "\(sql.debugDescription)")
+    }
+
+    /// The same constructs where every server reads only one harmless statement (pinned against servers by the
+    /// integration suite): allowed.
+    @Test(arguments: [
+        "SELECT 1 -- c\r; DROP TABLE t",
+        "SELECT 'a\\'; DROP TABLE t; --'",
+        "SELECT $a$; DROP TABLE t; $a$",
+        "SELECT $$; DROP TABLE t; $$",
+        "SELECT 1 /* /* */ ; DROP TABLE t */",
+        "SELECT 1, .5",
+        "SELECT 1.5e3",
+        "SELECT 4 //2\n",
+        "SELECT 'a\u{A0}b\u{FEFF}', `c\u{200B}d`",
+        "SELECT 1 -- 查询\u{3000}说明",
+        "SELECT 1 /* \u{FEFF} */",
+        "SELECT t.1e FROM (SELECT 1 AS `1e`) AS t",
+        "SELECT 1e-5, 1_000, 0x1F, x.1.2",
+    ])
+    func allowed(sql: String) {
+        #expect(ReadOnlySQLGuard.check(sql) == nil, "\(sql.debugDescription) → \(ReadOnlySQLGuard.check(sql) ?? "")")
+    }
+}
+
 @Suite("Read-only editor batches")
 struct ReadOnlyBatchTests {
     @Test func editorBatchesOnReadOnlyConnectionsUseTheGuard() {
@@ -416,5 +501,164 @@ struct LexerParityTests {
         #expect(!kinds("SELECT 1 #\tx").contains { $0.0 == .comment })
         #expect(!kinds("SELECT 1 #").contains { $0.0 == .comment })
         #expect(kinds("SELECT 1 # x").contains { $0 == (.comment, "# x") })
+    }
+
+    private func texts(_ sql: String) -> [String] { kinds(sql).map(\.1) }
+
+    /// `//` starts a line comment on every server (22.8, 24.8, 26.8), up to `\n` only, even right after a number.
+    @Test func doubleSlashIsALineComment() {
+        #expect(texts("SELECT 1 // c\n, 2") == ["SELECT", "1", "// c", ",", "2"])
+        #expect(texts("SELECT 4 //2\n") == ["SELECT", "4", "//2"])
+        #expect(texts("SELECT 1//2") == ["SELECT", "1", "//2"])
+        #expect(texts("SELECT 1 // c\r AS x") == ["SELECT", "1", "// c\r AS x"])
+        #expect(texts("SELECT '//' AS x") == ["SELECT", "'//'", "AS", "x"])
+        #expect(texts("SELECT 4 / 2") == ["SELECT", "4", "/", "2"])
+        let lexer = SQLLexer("SELECT 1 // open")
+        #expect(lexer.tokens().last.map(lexer.isUnterminated) == false, "a line comment is never unterminated")
+        #expect(SQLStatementSplitter.split("SELECT 1 // ; DROP TABLE t").count == 1)
+    }
+
+    /// The whitespace servers skip besides ASCII (U+00A0, U+FEFF, U+200B, …; every code point is checked against the
+    /// servers by `FormatterIntegrationTests`) separates tokens; other non-ASCII stays part of a word.
+    @Test func unicodeWhitespaceSeparatesTokens() {
+        #expect(texts("SELECT\u{A0}1,\u{FEFF}file(") == ["SELECT", "1", ",", "file", "("])
+        #expect(texts("a\u{200B}b\u{3000}c\u{2028}d\u{85}e") == ["a", "b", "c", "d", "e"])
+        #expect(texts("aéb x\u{200E}y") == ["aéb", "x\u{200E}y"], "U+200E is a format character servers reject, not whitespace")
+        #expect(texts("'a\u{A0}b'") == ["'a\u{A0}b'"])
+    }
+
+    /// Numbers end where ClickHouse's lexer ends them (probed on 22.8, 24.8 and 26.8; re-checked by
+    /// `FormatterIntegrationTests`). Where versions differ, the longer token is taken (and Format SQL refuses the text).
+    @Test func numbersEndLikeClickHouse() {
+        // A number runs on through word characters: a name (`1abc`, `1e2x`, `0x1g`) or a malformed number (`1.5x`).
+        for word in ["1.5x", "1e2x", "1abc", "0x1g", "0b102", "1_000", "1.end", "1inf", "1e+5x", "1.5e3x", "08", "1__0", "1ex"] {
+            #expect(texts(word) == [word], "\(word)")
+        }
+        #expect(kinds("1e2x").map { "\($0.0)" } == ["number"])
+        // Literal shapes: fractions, exponents with signs, hexadecimal floats, separators.
+        for literal in ["1.", "1.e5", "1.e+2", "08.5", "0x1.8p1", "0x1p3", "0x1.", "0x1_f", "1e1_0", "1_000.5", "1e-5"] {
+            #expect(texts(literal) == [literal], "\(literal)")
+        }
+        // Version-dependent prefixes take the longer (22.8) reading: one token.
+        #expect(texts("0x.5") == ["0x.5"])
+        #expect(texts("0b2.5") == ["0b2.5"])
+        // A hexadecimal number's exponent is `p`: `e` is a digit, and a `+` after it is an operator.
+        #expect(texts("0x1e+2x") == ["0x1e", "+", "2x"])
+        // An exponent takes its sign only with digits after it (servers would take `1e-x` whole, as a malformed number:
+        // `uncertainToken` refuses such text in the guard and Format SQL).
+        #expect(texts("1e-x") == ["1e", "-", "x"])
+        #expect(texts("1e+") == ["1e", "+"])
+        #expect(texts("1.5e-x") == ["1.5e", "-", "x"])
+        #expect(texts("0x1p-x") == ["0x1p", "-", "x"])
+        // Word characters end at `$` and at non-ASCII letters.
+        #expect(texts("1a$b") == ["1a", "$b"])
+        #expect(texts("1é") == ["1", "é"])
+    }
+
+    /// `.` followed by a digit is a dot (tuple access) after a name, a number, `)` or `]` — counting the token before
+    /// it across whitespace and comments, as ClickHouse does — and starts a number elsewhere. A number that starts
+    /// with `.` takes no word characters after it: `.5x` is `.5` and `x`.
+    @Test func dotsAndNumbersLikeClickHouse() {
+        #expect(texts("1.2.3") == ["1.2", ".", "3"])
+        #expect(texts("1..2") == ["1.", ".", "2"])
+        #expect(texts("x .5") == ["x", ".", "5"])
+        #expect(texts("(1, 2) .1") == ["(", "1", ",", "2", ")", ".", "1"])
+        #expect(texts("t./*c*/1") == ["t", ".", "/*c*/", "1"])
+        #expect(texts("t /*c*/ .1") == ["t", "/*c*/", ".", "1"])
+        #expect(texts("(1,2)--c\n.1") == ["(", "1", ",", "2", ")", "--c", ".", "1"])
+        #expect(texts("SELECT .5") == ["SELECT", ".", "5"], "a dot after a word, even a keyword")
+        #expect(texts("1 .5") == ["1", ".", "5"])
+        #expect(texts(".5") == [".5"])
+        #expect(texts("(.5)") == ["(", ".5", ")"])
+        #expect(texts("1+.5, .5e2") == ["1", "+", ".5", ",", ".5e2"])
+        #expect(texts("'a'.1") == ["'a'", ".1"])
+        #expect(texts("{p:UInt8}.1") == ["{p:UInt8}", ".1"])
+        #expect(texts("(.5x)") == ["(", ".5", "x", ")"])
+        #expect(texts("(.5end)") == ["(", ".5e", "nd", ")"])
+        #expect(texts("(.5e+x)") == ["(", ".5e", "+", "x", ")"])
+        #expect(texts("(.5_1)") == ["(", ".5_1", ")"])
+    }
+
+    /// Review #3: after a dot every server reads a digit-led token as digits and word characters only — no fraction,
+    /// no exponent sign (`t.1e-x` is `t.1e` minus `x`; `x.1.2` is chained tuple access), across whitespace and comments.
+    @Test func digitsAfterADotAreANamePart() {
+        #expect(texts("t.1e-file(") == ["t", ".", "1e", "-", "file", "("])
+        #expect(texts("t . 1e+x") == ["t", ".", "1e", "+", "x"])
+        #expect(texts("t./**/12abc-x") == ["t", ".", "/**/", "12abc", "-", "x"])
+        #expect(texts("t.0x1p-x") == ["t", ".", "0x1p", "-", "x"])
+        #expect(texts("t.1_0e-x") == ["t", ".", "1_0e", "-", "x"])
+        #expect(texts("x.1.2") == ["x", ".", "1", ".", "2"])
+        #expect(texts("x.1e2x") == ["x", ".", "1e2x"])
+    }
+
+    /// Review #6: heredoc closings are found in one pass. The index finds exactly what a scan from each `$` finds (the
+    /// tag runs to the next `$`; the heredoc ends after the next `$tag$`), on random `$`-heavy text.
+    @Test func heredocIndexMatchesAScan() {
+        func scanEnd(_ units: [UInt16], from index: Int) -> Int? {
+            var tagEnd = index + 1
+            while tagEnd < units.count, units[tagEnd] != 0x24 { tagEnd += 1 }
+            guard tagEnd < units.count else { return nil }
+            let length = tagEnd + 1 - index
+            var position = tagEnd + 1
+            while position + length <= units.count {
+                if units[position] == 0x24, (1..<length).allSatisfy({ units[position + $0] == units[index + $0] }) { return position + length }
+                position += 1
+            }
+            return nil
+        }
+        var generator = SplitMix64(seed: 6)
+        let alphabet = Array("$$$ab1 _".utf16)
+        for _ in 0..<3_000 {
+            let units = (0..<Int(generator.next() % 30)).map { _ in alphabet[Int(generator.next() % UInt64(alphabet.count))] }
+            let text = String(decoding: units, as: UTF16.self)
+            let lexer = SQLLexer(text)
+            for token in lexer.tokens() where units[token.range.lowerBound] == 0x24 {
+                let expected = scanEnd(units, from: token.range.lowerBound)
+                if token.kind == .string {
+                    #expect(token.range.upperBound == expected, "\(text.debugDescription)")
+                } else {
+                    #expect(expected == nil, "\(text.debugDescription): a heredoc missed")
+                }
+            }
+        }
+    }
+
+    /// Review #6: `$0 + $1 + …` (no tag ever closes) is linear: 1.2.0 took 8.8 s at 349 KB, rescanning to the end from
+    /// every `$`, and froze highlighting on every keystroke.
+    @Test func manyUnclosedDollarsStayLinear() {
+        let text = "select " + (0..<40_000).map { "$\($0)" }.joined(separator: " + ")
+        #expect(text.utf16.count > 300_000)
+        let started = SQLFormatterTests.threadCPUTime()
+        let tokens = SQLLexer.tokenize(text)
+        _ = SQLLinter.diagnose(text)
+        _ = SQLStatementSplitter.split(text)
+        _ = ReadOnlySQLGuard.check(text)
+        #expect(SQLFormatterTests.threadCPUTime() - started < .seconds(5), "debug-build bound")
+        #expect(tokens.count > 79_000)
+    }
+
+    /// Tokens whose range a supported server could read differently: the read-only guard refuses them.
+    @Test func uncertainTokens() {
+        func uncertain(_ sql: String) -> String? {
+            let lexer = SQLLexer(sql)
+            return lexer.uncertainToken(in: lexer.tokens()).map(lexer.text(of:))
+        }
+        #expect(uncertain("SELECT 1e-x") == "1e")
+        #expect(uncertain("SELECT 1, .5e+x") == ".5e")
+        #expect(uncertain("SELECT .5e+x") == nil, "after SELECT the dot is a dot, as on every server: `5e` is a name part")
+        #expect(uncertain("SELECT 0x1p-x") == "0x1p")
+        #expect(uncertain("SELECT 1_000.5") == "1_000.5")
+        #expect(uncertain("SELECT 0x.5") == "0x.5")
+        #expect(uncertain("SELECT $a b$ x $a b$") == "$a b$ x $a b$")
+        for sql in ["SELECT 1e-5", "SELECT 1_000", "SELECT 0xg", "SELECT t.1e-x", "SELECT 1e - x", "SELECT 1abe-x", "SELECT 0x1e-x", "SELECT 1e2"] {
+            #expect(uncertain(sql) == nil, "\(sql)")
+        }
+    }
+
+    /// The shared lexer folds words with Unicode upper-casing, so the read-only guard treats `ſettings` like SETTINGS
+    /// (stricter; ClickHouse itself rejects such words). Format SQL matches keywords on ASCII only (its own tests).
+    @Test func keywordFoldingStaysStrictForTheGuard() {
+        #expect(kinds("ﬁrst first ſelect x").map { "\($0.0)" } == ["keyword", "keyword", "keyword", "identifier"])
+        #expect(ReadOnlySQLGuard.check("SELECT 1 ſettings max_threads = 1") != nil)
     }
 }

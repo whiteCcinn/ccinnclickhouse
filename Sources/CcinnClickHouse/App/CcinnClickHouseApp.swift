@@ -200,9 +200,10 @@ struct ConnectingView: View {
 /// `CcinnClickHouse --connect host:port [--https] [--user u] [--database db] [--cluster c] [--object db.table]
 ///  [--section overview|columns|parts|indexes|mutations|replication|ddl|data] [--sql "…"] [--auto-run]
 ///  [--view grid|chart|plan] [--operations running|merges|mutations|replication|querylog|storage|dictionaries|cluster]
-///  [--log slowest|memory|failed|patterns|byuser] [--duplicate-window] [--profile name]`
+///  [--log slowest|memory|failed|patterns|byuser] [--duplicate-window] [--format] [--profile name]`
 /// Passwords come from `CCINNCLICKHOUSE_PASSWORD`, never from the command line. `--duplicate-window` opens one more
-/// window with the same connection (as ⇧⌘N does) once the first one is connected.
+/// window with the same connection (as ⇧⌘N does) once the first one is connected; `--format` formats the `--sql` text
+/// (as ⌥⌘L does) before `--auto-run`.
 @MainActor
 enum LaunchArguments {
     private static var consumed = false
@@ -247,6 +248,11 @@ enum LaunchArguments {
                 }
                 if let sql = value("--sql") {
                     let model = workspace.openSQL(text: sql.replacingOccurrences(of: "\\n", with: "\n"), database: value("--database"))
+                    if arguments.contains("--format") {
+                        try? await Task.sleep(for: .milliseconds(300)) // let the editor attach so the edit is undoable
+                        model.formatSQL()
+                        for _ in 0..<100 where model.isFormatting { try? await Task.sleep(for: .milliseconds(20)) }
+                    }
                     if arguments.contains("--auto-run") {
                         model.runAll()
                         if let view = value("--view"), let mode = StatementOutcome.ViewMode.allCases.first(where: { $0.rawValue.lowercased() == view.lowercased() }) {
@@ -327,6 +333,8 @@ enum AppearancePreference: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @AppStorage("appearance") private var appearance = AppearancePreference.system.rawValue
     @AppStorage("autoLimit") private var autoLimit = 1000
+    @AppStorage("sqlFormatKeywordCase") private var formatKeywordCase = SQLFormatOptions.KeywordCase.preserve.rawValue
+    @AppStorage("sqlFormatIndent") private var formatIndent = 2
 
     var body: some View {
         Form {
@@ -336,6 +344,16 @@ struct SettingsView: View {
             Picker("Automatic LIMIT for SELECT", selection: $autoLimit) {
                 Text("None").tag(0)
                 ForEach([100, 500, 1000, 5000, 10_000, 50_000], id: \.self) { Text($0.formatted()).tag($0) }
+            }
+            Picker("Format SQL: keyword case", selection: $formatKeywordCase) {
+                Text("Unchanged").tag(SQLFormatOptions.KeywordCase.preserve.rawValue)
+                Text("UPPER").tag(SQLFormatOptions.KeywordCase.upper.rawValue)
+                Text("lower").tag(SQLFormatOptions.KeywordCase.lower.rawValue)
+            }
+            .help("Only words ClickHouse can read as nothing but a keyword where they stand change case; names, functions and aliases never do.")
+            Picker("Format SQL: indent", selection: $formatIndent) {
+                Text("2 spaces").tag(2)
+                Text("4 spaces").tag(4)
             }
             LabeledContent("Saved connections") {
                 Button("Show in Finder") {
@@ -381,6 +399,11 @@ struct AppCommands: Commands {
             Button("Disconnect") { session?.disconnect() }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
                 .disabled(session?.workspace == nil)
+        }
+        CommandGroup(after: .textEditing) {
+            Button("Format SQL") { session?.workspace?.selectedSQL?.formatSQL() }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                .disabled(session?.workspace?.selectedSQL == nil)
         }
         CommandMenu("Server") {
             Button("Refresh Databases") { session?.workspace?.refreshAll() }

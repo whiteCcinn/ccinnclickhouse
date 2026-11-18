@@ -56,6 +56,63 @@ private final class EditorHarness {
 @Suite("SQL editor", .serialized)
 @MainActor
 struct SQLEditorTests {
+    @Test func formattingIsOneUndoableEditThatEditTrackingSees() throws {
+        let original = "select a, b from t"
+        let harness = EditorHarness(original)
+        let undo = try #require(harness.textView.undoManager)
+        undo.groupsByEvent = false
+        let formatted = try #require(SQLFormatter.format(original))
+        let length = (original as NSString).length
+        undo.beginUndoGrouping()
+        #expect(harness.textView.replace(NSRange(location: 0, length: length), with: formatted, expecting: original,
+                                         actionName: "Format SQL", selecting: NSRange(location: 3, length: 0)) == .replaced)
+        undo.endUndoGrouping()
+        #expect(harness.textView.string == formatted)
+        #expect(harness.text == formatted, "the binding is updated like typing")
+        #expect(!harness.reportedEdits.isEmpty, "edit tracking sees the replacement")
+        #expect(harness.textView.selectedRange() == NSRange(location: 3, length: 0))
+        #expect(undo.undoActionName == "Format SQL")
+        undo.undo()
+        #expect(harness.textView.string == original, "one ⌘Z restores the original")
+        // Out-of-date ranges are refused instead of trapping.
+        #expect(harness.textView.replace(NSRange(location: 0, length: 10_000), with: "x", expecting: original, actionName: "Format SQL",
+                                         selecting: NSRange(location: 0, length: 0)) == .textChanged)
+    }
+
+    /// Review #2: a format finishing while an input method composes never replaces the text (or ends the composition).
+    @Test func formattingWaitsForTheInputMethod() {
+        let harness = EditorHarness("select 1")
+        harness.textView.setSelectedRange(NSRange(location: 8, length: 0))
+        harness.textView.setMarkedText(" ni", selectedRange: NSRange(location: 3, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        let outcome = harness.textView.replace(NSRange(location: 0, length: 8), with: "SELECT 1", expecting: "select 1", actionName: "Format SQL",
+                                               selecting: NSRange(location: 0, length: 0))
+        #expect(outcome == .composing)
+        #expect(harness.textView.hasMarkedText())
+        #expect(harness.textView.string == "select 1 ni")
+    }
+
+    /// Review #2: the result applies only to the live text it was computed for, not to the model's (possibly lagging) copy.
+    @Test func formattingRefusesTextThatChanged() {
+        let harness = EditorHarness("select 1")
+        harness.type(" + 2", at: 8)
+        let outcome = harness.textView.replace(NSRange(location: 0, length: 8), with: "SELECT 1", expecting: "select 1", actionName: "Format SQL",
+                                               selecting: NSRange(location: 0, length: 0))
+        #expect(outcome == .textChanged)
+        #expect(harness.textView.string == "select 1 + 2")
+    }
+
+    /// Review: "unchanged" means the same UTF-16 code units, not Swift's canonical equivalence. NFD `é` (e + U+0301) is
+    /// equal to NFC `é` as a `String`, but a range computed on one is wrong on the other.
+    @Test func formattingRefusesCanonicallyEquivalentButDifferentText() {
+        let harness = EditorHarness("select 'e\u{301}'")
+        let nfc = "select '\u{E9}'"
+        #expect(harness.textView.string == nfc, "Swift calls them equal")
+        let outcome = harness.textView.replace(NSRange(location: 0, length: 6), with: "SELECT", expecting: nfc, actionName: "Format SQL",
+                                               selecting: NSRange(location: 0, length: 0))
+        #expect(outcome == .textChanged)
+        #expect(harness.textView.string.utf16.elementsEqual("select 'e\u{301}'".utf16))
+    }
+
     // A re-render while an input method composes must not overwrite the marked text.
     @Test func compositionSurvivesARenderWithLaggingText() {
         let harness = EditorHarness("SELECT 1")
@@ -152,5 +209,101 @@ struct SQLEditorTests {
         #expect(harness.coordinator.diagnostics == [failure])
         #expect(harness.textView.inlineDiagnostics == [failure])
         #expect(harness.textView.string == "SELECT x FROM t")
+    }
+}
+
+/// Format SQL as the toolbar and ⌥⌘L run it: on the editor's own text and selection, as one edit, and with a reason in
+/// the status line whenever the text is left as it was.
+@Suite("Format SQL in the editor", .serialized)
+@MainActor
+struct SQLFormatRunnerTests {
+    private let upper = SQLFormatOptions(keywordCase: .upper)
+
+    /// Runs Format SQL and waits for it to finish.
+    private func format(_ runner: SQLFormatRunner, fallback: (text: String, selection: NSRange) = ("", NSRange(location: 0, length: 0)),
+                        options: SQLFormatOptions = SQLFormatOptions(keywordCase: .upper),
+                        whileRunning: () -> Void = {}, direct: @escaping SQLFormatRunner.DirectReplace = { _, _, _, _ in false }) async throws {
+        runner.format(options: options, fallback: fallback, replaceWithoutEditor: direct)
+        whileRunning()
+        let deadline = ContinuousClock.now + .seconds(10)
+        while runner.isRunning, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(!runner.isRunning)
+    }
+
+    /// The editor's own text and selection are formatted, not the model's copy (which lags while an input method composes).
+    @Test func formatsTheEditorsOwnTextAndSelection() async throws {
+        let harness = EditorHarness("select a,b from t")
+        let runner = SQLFormatRunner()
+        runner.editor.textView = harness.textView
+        harness.textView.setSelectedRange(NSRange(location: 7, length: 3))
+        try await format(runner, fallback: ("stale model text", NSRange(location: 0, length: 0)))
+        #expect(harness.textView.string == "select a, b from t")
+        #expect(harness.textView.selectedRange() == NSRange(location: 7, length: 4))
+        #expect(runner.notice == nil)
+        harness.textView.setSelectedRange(NSRange(location: 0, length: 0))
+        try await format(runner)
+        #expect(harness.textView.string == "SELECT\n  a,\n  b\nFROM t")
+        #expect(harness.text == "SELECT\n  a,\n  b\nFROM t", "the model hears about it like typing")
+    }
+
+    /// Final review (d): every refusal says why in the status line.
+    @Test func aRefusalSaysWhy() async throws {
+        let harness = EditorHarness("select 1_000, a from t")
+        let runner = SQLFormatRunner()
+        runner.editor.textView = harness.textView
+        try await format(runner)
+        #expect(runner.notice == .refused(.ambiguousToken("1_000")))
+        #expect(runner.notice?.message.contains("1_000") == true)
+        #expect(harness.textView.string == "select 1_000, a from t")
+
+        harness.textView.string = "SELECT 1"
+        try await format(runner)
+        #expect(runner.notice == .alreadyFormatted)
+    }
+
+    @Test func composingTextIsNeverFormatted() async throws {
+        let harness = EditorHarness("select a,b from t")
+        let runner = SQLFormatRunner()
+        runner.editor.textView = harness.textView
+        harness.textView.setSelectedRange(NSRange(location: 17, length: 0))
+        harness.textView.setMarkedText(" ni", selectedRange: NSRange(location: 3, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        try await format(runner)
+        #expect(runner.notice == .composing)
+        #expect(harness.textView.hasMarkedText())
+        #expect(harness.textView.string == "select a,b from t ni")
+    }
+
+    /// Text typed while the format runs: the result is for the old text, so it is not applied, and the user is told.
+    @Test func textChangedWhileFormattingIsLeftAlone() async throws {
+        let harness = EditorHarness("select a,b from t")
+        let runner = SQLFormatRunner()
+        runner.editor.textView = harness.textView
+        try await format(runner, whileRunning: { harness.type(" x", at: 17) })
+        #expect(harness.textView.string == "select a,b from t x")
+        #expect(runner.notice == .textChanged)
+        // A model edit (typing, Open) while a format runs cancels it and says so.
+        runner.format(options: upper, fallback: ("", NSRange(location: 0, length: 0))) { _, _, _, _ in false }
+        runner.textDidChange()
+        #expect(!runner.isRunning)
+        #expect(runner.notice == .textChanged)
+        // The next edit clears the notice.
+        runner.textDidChange()
+        #expect(runner.notice == nil)
+    }
+
+    /// A tab opened from launch arguments before its editor appeared: the model's text is formatted and replaced.
+    @Test func withoutAnEditorTheModelTextIsReplaced() async throws {
+        let runner = SQLFormatRunner()
+        var replaced: (String, NSRange, String, NSRange)?
+        try await format(runner, fallback: ("select a,b from t", NSRange(location: 0, length: 0)), direct: { expected, range, text, selection in
+            replaced = (expected, range, text, selection)
+            return true
+        })
+        #expect(replaced?.0 == "select a,b from t")
+        #expect(replaced?.1 == NSRange(location: 0, length: 17))
+        #expect(replaced?.2 == "SELECT\n  a,\n  b\nFROM t")
+        #expect(runner.notice == nil)
+        try await format(runner, fallback: ("select a,b from t", NSRange(location: 0, length: 0)), direct: { _, _, _, _ in false })
+        #expect(runner.notice == .textChanged)
     }
 }
