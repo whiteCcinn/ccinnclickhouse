@@ -12,13 +12,17 @@ private final class EditorHarness {
     var selection = NSRange(location: 0, length: 0)
     var diagnostics: [SQLDiagnostic] = []
     var reportedEdits: [SQLTextEdit] = []
+    var completionProvider: CompletionProvider?
     let textView: SQLTextView
     let coordinator: SQLEditor.Coordinator
     private let window: NSWindow
 
-    init(_ text: String, diagnostics: [SQLDiagnostic] = []) {
+    init(_ text: String, diagnostics: [SQLDiagnostic] = [], completionSchema: SchemaSnapshot? = nil) {
         self.text = text
         self.diagnostics = diagnostics
+        if let completionSchema {
+            completionProvider = { text, cursor in CompletionEngine.complete(text: text, cursor: cursor, schema: completionSchema) }
+        }
         textView = SQLTextView(frame: NSRect(x: 0, y: 0, width: 800, height: 400))
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 400), styleMask: [.titled], backing: .buffered, defer: true)
         coordinator = SQLEditor.Coordinator(SQLEditor(text: .constant(text), selection: .constant(selection)))
@@ -40,6 +44,7 @@ private final class EditorHarness {
         SQLEditor(text: Binding(get: { self.text }, set: { self.text = $0 }),
                   selection: Binding(get: { self.selection }, set: { self.selection = $0 }),
                   diagnostics: diagnostics,
+                  completionProvider: completionProvider,
                   onEdit: { self.reportedEdits += $0 })
     }
 
@@ -50,6 +55,21 @@ private final class EditorHarness {
         textView.setSelectedRange(NSRange(location: location, length: 0))
         selection = textView.selectedRange()
         textView.insertText(string, replacementRange: textView.selectedRange())
+    }
+
+    /// Types `string` at the end, one key at a time.
+    func typeAtEnd(_ string: String) {
+        for character in string { type(String(character), at: (textView.string as NSString).length) }
+    }
+
+    /// Labels of the completion popup once it shows something, `nil` if it stays hidden.
+    func shownCompletions(within timeout: Duration = .seconds(2)) async throws -> [String]? {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if let items = coordinator.visibleCompletions { return items.map(\.label) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return nil
     }
 }
 
@@ -306,5 +326,187 @@ struct SQLFormatRunnerTests {
         #expect(runner.notice == nil)
         try await format(runner, fallback: ("select a,b from t", NSRange(location: 0, length: 0)), direct: { _, _, _, _ in false })
         #expect(runner.notice == .textChanged)
+    }
+}
+
+// MARK: - Completion
+
+@Suite("SQL completion popup", .serialized)
+@MainActor
+struct CompletionPopupTests {
+    static let tables = ["adx_demand", "adx_publisher", "dws_uparpu_adx_funnel_reason_hi", "mv_report_adx_hour"]
+    static let schema = SchemaSnapshot(
+        currentDatabase: "taku", databases: ["taku"],
+        objectsByDatabase: ["taku": tables.map { SchemaSnapshot.ObjectEntry(name: $0, family: .mergeTree) }],
+        vocabulary: ServerVocabulary(functions: [], combinators: [], settings: [], formats: ["JSONEachRow", "TabSeparated"], engines: [],
+                                     tableFunctions: [], dataTypes: []))
+
+    private func item(_ label: String) -> CompletionItem { CompletionItem(kind: .keyword, label: label, insertText: label, detail: nil) }
+
+    private func runLoop(for seconds: TimeInterval = 0.3) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+
+    private func pixels(of panel: NSPanel) throws -> Data {
+        let view = try #require(panel.contentView)
+        let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let bytes = try #require(bitmap.bitmapData)
+        return Data(bytes: bytes, count: bitmap.bytesPerRow * bitmap.pixelsHigh)
+    }
+
+    /// What a panel shows for `items`, drawn by a panel that never showed anything else.
+    private func freshRendering(of items: [CompletionItem], frame: NSRect) throws -> Data {
+        let model = CompletionListModel()
+        model.update(items: items, prefix: "")
+        let panel = CompletionPanel(model: model)
+        panel.setFrame(frame, display: true)
+        panel.orderFront(nil)
+        defer { panel.orderOut(nil) }
+        runLoop()
+        return try pixels(of: panel)
+    }
+
+    // The popup kept drawing the first list it showed: `from` listed SELECT/SET, `adx_publisher` the `adx` list.
+    @Test func theListDrawsTheLatestResult() throws {
+        _ = NSApplication.shared
+        let first = ["SELECT", "SET"].map(item)
+        let second = ["FROM", "fromUnixTimestamp"].map(item)
+        let model = CompletionListModel()
+        let panel = CompletionPanel(model: model)
+        model.update(items: first, prefix: "se")
+        let frame = NSRect(origin: NSPoint(x: 240, y: 320), size: model.preferredSize)
+        panel.setFrame(frame, display: true)
+        panel.orderFront(nil)
+        runLoop()
+        model.update(items: second, prefix: "from")
+        runLoop()
+        let shown = try pixels(of: panel)
+        panel.orderOut(nil)
+
+        let expected = try freshRendering(of: second, frame: frame)
+        #expect(try freshRendering(of: first, frame: frame) != expected, "the two lists must look different for this test to mean anything")
+        #expect(shown == expected)
+    }
+
+    // Spec "Suggestions for the text at the cursor": the list opens on the space, before any letter is typed.
+    @Test func spaceAfterFromListsTheTables() async throws {
+        let harness = EditorHarness("select * from", completionSchema: Self.schema)
+        harness.typeAtEnd(" ")
+        let labels = try #require(try await harness.shownCompletions())
+        #expect(Array(labels.prefix(4)) == Self.tables)
+    }
+
+    @Test func spaceAfterFormatListsTheFormats() async throws {
+        let harness = EditorHarness("select 1 format", completionSchema: Self.schema)
+        harness.typeAtEnd(" ")
+        #expect(try await harness.shownCompletions() == ["JSONEachRow", "TabSeparated"])
+    }
+
+    @Test func spaceElsewhereKeepsTheListClosed() async throws {
+        for text in ["select *", "select * from adx_demand", "select * from adx_demand order by id desc", "show tables"] {
+            let harness = EditorHarness(text, completionSchema: Self.schema)
+            harness.typeAtEnd(" ")
+            #expect(try await harness.shownCompletions(within: .milliseconds(300)) == nil, "\(text)")
+        }
+    }
+
+    // Return is pressed twice for a blank line; a list opened by the first would take the second.
+    @Test func returnOrTabAfterFromKeepsTheListClosed() async throws {
+        for typed in ["\n", "    "] {
+            let harness = EditorHarness("select *\nfrom", completionSchema: Self.schema)
+            harness.type(typed, at: (harness.textView.string as NSString).length)
+            #expect(try await harness.shownCompletions(within: .milliseconds(300)) == nil, "\(typed.debugDescription)")
+        }
+    }
+
+    // A list computed for `adx` must not stay up (and be accepted with Return) once a space ends the name.
+    @Test func whitespaceClosesTheListAtOnce() async throws {
+        let harness = EditorHarness("select * from ", completionSchema: Self.schema)
+        harness.typeAtEnd("adx")
+        #expect(try await harness.shownCompletions()?.first == "adx_demand")
+        harness.typeAtEnd(" ")
+        #expect(harness.coordinator.visibleCompletions == nil)
+        #expect(try await harness.shownCompletions(within: .milliseconds(300)) == nil)
+    }
+
+    private func press(_ selector: Selector, in harness: EditorHarness) {
+        harness.textView.doCommand(by: selector)
+    }
+
+    // Review: Return or Tab right after a list a space opened (nothing typed, nothing chosen) does its normal job.
+    @Test func returnOrTabAfterASpaceOpenedListDoTheirNormalJob() async throws {
+        for (selector, inserted) in [(#selector(NSResponder.insertNewline(_:)), "\n"), (#selector(NSResponder.insertTab(_:)), "    ")] {
+            let harness = EditorHarness("select * from adx_demand,", completionSchema: Self.schema)
+            harness.typeAtEnd(" ")
+            #expect(try await harness.shownCompletions() != nil)
+            press(selector, in: harness)
+            #expect(harness.textView.string == "select * from adx_demand, " + inserted)
+            #expect(harness.coordinator.visibleCompletions == nil)
+        }
+    }
+
+    @Test func choosingInASpaceOpenedListThenReturnAcceptsIt() async throws {
+        let harness = EditorHarness("select * from", completionSchema: Self.schema)
+        harness.typeAtEnd(" ")
+        #expect(try await harness.shownCompletions()?.first == "adx_demand")
+        press(#selector(NSResponder.moveDown(_:)), in: harness)
+        press(#selector(NSResponder.insertNewline(_:)), in: harness)
+        #expect(harness.textView.string == "select * from adx_publisher")
+    }
+
+    // Review: Return pressed before the next result arrives took a name from the list for the previous letters.
+    @Test func typingNarrowsAtOnceSoReturnTakesTheTypedName() async throws {
+        let harness = EditorHarness("select * from", completionSchema: Self.schema)
+        harness.typeAtEnd(" ")
+        #expect(try await harness.shownCompletions()?.first == "adx_demand")
+        harness.typeAtEnd("adx_p")
+        #expect(harness.coordinator.visibleCompletions?.map(\.label) == ["adx_publisher"])
+        press(#selector(NSResponder.insertNewline(_:)), in: harness)
+        #expect(harness.textView.string == "select * from adx_publisher")
+    }
+
+    @Test func returnAfterTypedLettersAcceptsTheFirstMatch() async throws {
+        let harness = EditorHarness("select * from ", completionSchema: Self.schema)
+        harness.typeAtEnd("dws")
+        #expect(try await harness.shownCompletions()?.first == "dws_uparpu_adx_funnel_reason_hi")
+        press(#selector(NSResponder.insertNewline(_:)), in: harness)
+        #expect(harness.textView.string == "select * from dws_uparpu_adx_funnel_reason_hi")
+    }
+
+    // Review 3: a letter typed inside a name (no word ends at the caret, so nothing is typed "before" it) opened the whole
+    // table list, and Return then inserted a name in the middle of the word. Only a space opens a list with nothing typed.
+    @Test func aLetterInsideANameOpensNoList() async throws {
+        let harness = EditorHarness("select * from adx_demand", completionSchema: Self.schema)
+        harness.type("z", at: ("select * from adx" as NSString).length)
+        #expect(try await harness.shownCompletions(within: .milliseconds(300)) == nil)
+        press(#selector(NSResponder.insertNewline(_:)), in: harness)
+        #expect(harness.textView.string == "select * from adxz\n_demand")
+    }
+
+    @Test func aLetterInsideBackquotesOpensNoList() async throws {
+        // As auto-pairing leaves it: the caret between two backquotes.
+        let harness = EditorHarness("select * from ``", completionSchema: Self.schema)
+        var caret = ("select * from `" as NSString).length
+        for letter in "adx_p" {
+            harness.type(String(letter), at: caret)
+            caret += 1
+        }
+        #expect(try await harness.shownCompletions(within: .milliseconds(300)) == nil)
+        press(#selector(NSResponder.insertNewline(_:)), in: harness)
+        #expect(!harness.textView.string.contains("adx_demand"))
+    }
+
+    @Test func typingNarrowsTheListUntilOnlyTheExactNameIsLeft() async throws {
+        let harness = EditorHarness("select * from ", completionSchema: Self.schema)
+        harness.typeAtEnd("adx")
+        #expect(try await harness.shownCompletions()?.count == 4)
+        harness.typeAtEnd("_p")
+        let deadline = ContinuousClock.now + .seconds(2)
+        while harness.coordinator.visibleCompletions?.map(\.label) != ["adx_publisher"], ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(harness.coordinator.visibleCompletions?.map(\.label) == ["adx_publisher"])
+        harness.typeAtEnd("ublisher")
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(harness.coordinator.visibleCompletions == nil, "only the exact name is left")
     }
 }

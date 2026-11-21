@@ -136,4 +136,63 @@ struct CompletionTests {
         }
         #expect(rounds == 2_000)
     }
+
+    // The editor opens the list on a space only where a name from a known list must follow.
+    @Test func nameContextsAreFlagged() {
+        for text in ["SELECT * FROM |", "SELECT * FROM events e JOIN |", "SELECT * FROM events e, |", "INSERT INTO |", "OPTIMIZE TABLE |",
+                     "DESC |", "DESCRIBE TABLE |", "EXISTS |", "DROP TABLE IF EXISTS |", "use |", "SHOW TABLES FROM |",
+                     "SELECT 1 FORMAT |", "SELECT 1 SETTINGS |", "SELECT 1 SETTINGS max_threads = 1, |", "SET |",
+                     "CREATE TABLE t (a UInt8) ENGINE = |", "CREATE TABLE t ON CLUSTER |", "SELECT 1;\nSELECT * FROM |"] {
+            #expect(complete(text).expectsObjectName, "\(text)")
+        }
+        for text in ["|", "SELECT |", "SELECT * FROM events e |", "SELECT * FROM events WHERE country = |", "SELECT * FROM shop.|",
+                     "SELECT * FROM events ORDER BY user_id DESC |", "SELECT * FROM events WHERE EXISTS |", "SELECT 'FROM |'",
+                     "SELECT 1 -- FROM |", "SELECT 1 SETTINGS max_threads = |", "SELECT CAST(1 AS |", "SHOW TABLES |"] {
+            #expect(!complete(text).expectsObjectName, "\(text)")
+        }
+    }
+
+    // Review: where a space must not open a list (a column named engine or format, FROM inside a function, …).
+    @Test func spaceOpensNoListWhereANameIsNotRequired() {
+        for text in ["SELECT name, engine |", "SELECT * FROM events WHERE engine |", "SELECT * FROM events WHERE engine = |",
+                     "SELECT * FROM events GROUP BY engine |", "SELECT format |", "SELECT x AS format |", "SELECT x engine |", "SELECT extract(DAY FROM |",
+                     "SELECT trim(BOTH ' ' FROM |", "SELECT substring(s FROM |", "SELECT * FROM events ARRAY JOIN |",
+                     "SELECT * FROM events LEFT ARRAY JOIN |", "SELECT 1 INTO |",
+                     "CREATE TABLE t (a UInt8) ENGINE = MergeTree ORDER BY a SETTINGS |", "CREATE DATABASE d ENGINE = |",
+                     "CREATE TABLE |", "CREATE TABLE IF NOT EXISTS |"] {
+            #expect(!complete(text).expectsObjectName, "\(text)")
+        }
+        for text in ["SHOW COLUMNS FROM |", "SELECT * FROM (SELECT * FROM |", "SELECT * FROM events WHERE id IN (SELECT id FROM |",
+                     "CREATE TABLE t (a UInt8) ENGINE = |", "SELECT * FROM events FORMAT |", "DELETE FROM |", "INSERT INTO t FORMAT |"] {
+            #expect(complete(text).expectsObjectName, "\(text)")
+        }
+        #expect(complete("SHOW COLUMNS FROM ev|").items.first?.label == "events")
+        #expect(!complete("SELECT extract(DAY FROM |").items.contains { $0.label == "events" })
+        #expect(!complete("SELECT name, engine |").items.contains { $0.label == "MergeTree" })
+        #expect(!complete("SELECT * FROM events ARRAY JOIN |").items.contains { $0.label == "events" })
+    }
+
+    // The editor narrows the shown list on each keystroke, before the next result arrives, with the engine's ranking.
+    @Test func narrowingRanksTheShownItemsForTheLongerPrefix() {
+        let opened = complete("SELECT * FROM |")
+        #expect(opened.items.contains { $0.label == "events" })
+        let narrowed = CompletionEngine.narrow(opened, appending: "ev")
+        #expect(narrowed.prefix == "ev")
+        #expect(narrowed.replacementRange == opened.replacementRange.lowerBound..<(opened.replacementRange.upperBound + 2))
+        #expect(narrowed.items.first?.label == "events")
+        #expect(narrowed.items.allSatisfy { CompletionEngine.matchScore(label: $0.label, needle: "ev", original: "ev") > 0 })
+        #expect(narrowed.expectsObjectName == opened.expectsObjectName)
+        #expect(CompletionEngine.narrow(opened, appending: "zzzz").items.isEmpty)
+    }
+
+    @Test func descAndExistsNameATableOnlyWhereTheyStartTheStatement() {
+        let sorted = complete("SELECT * FROM events ORDER BY user_id DESC |").items.map(\.label)
+        #expect(!sorted.contains("events"))
+        #expect(sorted.contains("LIMIT"))
+        #expect(!complete("SELECT 1 WHERE EXISTS |").items.contains { $0.label == "events" })
+        #expect(complete("DESC |").items.contains { $0.label == "events" })
+        #expect(complete("DESCRIBE ev|").items.first?.label == "events")
+        #expect(complete("EXISTS ev|").items.first?.label == "events")
+        #expect(complete("DROP TABLE IF EXISTS ev|").items.first?.label == "events")
+    }
 }

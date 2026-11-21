@@ -144,6 +144,12 @@ struct SQLEditor: NSViewRepresentable {
         private let completionModel = CompletionListModel()
         private var completionPanel: CompletionPanel?
         private var activeCompletion: CompletionResult?
+        /// Counts text changes, so a list computed for other text is never accepted.
+        private var textGeneration: UInt64 = 0
+        private var activeCompletionGeneration: UInt64 = 0
+        /// The visible list was opened by a space with nothing typed: Return and Tab keep their meaning until an item
+        /// is chosen with the arrow keys.
+        private var completionAwaitsChoice = false
         private var observers: [any NSObjectProtocol] = []
 
         init(_ parent: SQLEditor) {
@@ -243,6 +249,7 @@ struct SQLEditor: NSViewRepresentable {
         var hasPendingEdits: Bool { !pendingEdits.isEmpty }
 
         func textDidChange(_ notification: Notification) {
+            textGeneration &+= 1
             reportPendingEdits()
         }
 
@@ -439,19 +446,27 @@ struct SQLEditor: NSViewRepresentable {
                 switch selector {
                 case #selector(NSResponder.moveDown(_:)):
                     completionModel.move(1)
+                    completionAwaitsChoice = false
                     return true
                 case #selector(NSResponder.moveUp(_:)):
                     completionModel.move(-1)
+                    completionAwaitsChoice = false
                     return true
                 case #selector(NSResponder.pageDown(_:)), #selector(NSResponder.scrollPageDown(_:)):
                     completionModel.move(8)
+                    completionAwaitsChoice = false
                     return true
                 case #selector(NSResponder.pageUp(_:)), #selector(NSResponder.scrollPageUp(_:)):
                     completionModel.move(-8)
+                    completionAwaitsChoice = false
                     return true
                 case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
-                    if let item = completionModel.selectedItem { accept(item) }
-                    return true
+                    if let item = completionModel.selectedItem, !completionAwaitsChoice, isCurrent(activeCompletion, in: textView) {
+                        accept(item)
+                        return true
+                    }
+                    // A list nobody chose from, or one computed for other text: Return and Tab do their own job.
+                    hideCompletions()
                 case #selector(NSResponder.cancelOperation(_:)):
                     hideCompletions()
                     return true
@@ -473,6 +488,9 @@ struct SQLEditor: NSViewRepresentable {
 
         func forceCompletion() { scheduleCompletion(force: true) }
 
+        /// The items the popup lists; `nil` while it is hidden.
+        var visibleCompletions: [CompletionItem]? { completionPanel?.isVisible == true ? completionModel.items : nil }
+
         private func scheduleCompletion(force: Bool) {
             completionTask?.cancel()
             guard let provider = parent.completionProvider, let textView, parent.isEditable else { return }
@@ -483,29 +501,63 @@ struct SQLEditor: NSViewRepresentable {
                 let isWordInput = typed.count == 1 && typed.unicodeScalars.allSatisfy {
                     CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "." || $0 == "`" || $0 == "$"
                 }
-                guard isWordInput else { return hideCompletions() }
+                // A space may open a name list (`FROM ` → tables). Return and Tab never do: Return is pressed twice
+                // for a blank line, and the second press would take the list's first item.
+                let isSpace = typed == " "
+                guard isWordInput || isSpace else { return hideCompletions() }
+                if isSpace || typed == "." {
+                    // The word being completed ended: its list must not stay up, or be accepted, while the next one is
+                    // computed.
+                    hideCompletions()
+                } else if completionPanel?.isVisible == true, let active = activeCompletion,
+                          activeCompletionGeneration &+ 1 == textGeneration,
+                          selection.location == active.replacementRange.upperBound + typed.utf16.count {
+                    // A letter extends the word: narrow the shown list now, so Return before the next result takes a
+                    // name that matches what is typed.
+                    let narrowed = CompletionEngine.narrow(active, appending: typed)
+                    if narrowed.items.isEmpty || Self.isExactOnly(narrowed) {
+                        hideCompletions()
+                    } else {
+                        showCompletions(narrowed, awaitsChoice: false)
+                    }
+                }
             }
             let text = textView.string
             let cursor = selection.location
             let afterDot = lastInserted == "."
+            let openedBySpace = !force && lastInserted == " "
             completionTask = Task { [weak self] in
                 if !force { try? await Task.sleep(for: .milliseconds(70)) }
                 guard !Task.isCancelled else { return }
                 let result = await provider(text, cursor)
                 guard let self, !Task.isCancelled, let textView = self.textView,
                       textView.string == text, textView.selectedRange().location == cursor else { return }
-                let exactOnly = result.items.count == 1 && result.items[0].label.caseInsensitiveCompare(result.prefix) == .orderedSame
-                if result.items.isEmpty || exactOnly || (!force && result.prefix.isEmpty && !afterDot) {
+                // Only a space opens a name list with nothing typed: a letter typed inside a name has no word before
+                // the caret either, and must not open the whole list there.
+                let opensWithoutPrefix = force || afterDot || (openedBySpace && result.expectsObjectName)
+                if result.items.isEmpty || Self.isExactOnly(result) || (result.prefix.isEmpty && !opensWithoutPrefix) {
                     self.hideCompletions()
                 } else {
-                    self.showCompletions(result)
+                    self.showCompletions(result, awaitsChoice: openedBySpace && result.prefix.isEmpty)
                 }
             }
         }
 
-        private func showCompletions(_ result: CompletionResult) {
+        private static func isExactOnly(_ result: CompletionResult) -> Bool {
+            result.items.count == 1 && result.items[0].label.caseInsensitiveCompare(result.prefix) == .orderedSame
+        }
+
+        /// `result` was computed for the text as it is, and the caret is where it ends.
+        private func isCurrent(_ result: CompletionResult?, in textView: NSTextView) -> Bool {
+            guard let result, activeCompletionGeneration == textGeneration else { return false }
+            return textView.selectedRange() == NSRange(location: result.replacementRange.upperBound, length: 0)
+        }
+
+        private func showCompletions(_ result: CompletionResult, awaitsChoice: Bool) {
             guard let textView, let window = textView.window else { return }
             activeCompletion = result
+            activeCompletionGeneration = textGeneration
+            completionAwaitsChoice = awaitsChoice
             completionModel.update(items: result.items, prefix: result.prefix)
             let panel = completionPanel ?? CompletionPanel(model: completionModel)
             completionPanel = panel
@@ -895,9 +947,10 @@ private struct CompletionListView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
+                        // Rows keep the identity of their item. Keyed by position (`.id(index)`), row 0 stayed "the
+                        // same view" across results and kept drawing the first list ever shown.
                         ForEach(Array(model.items.enumerated()), id: \.element.id) { index, item in
                             CompletionRow(item: item, prefix: model.prefix, isSelected: index == model.selectedIndex)
-                                .id(index)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
                                     model.selectedIndex = index
@@ -908,7 +961,9 @@ private struct CompletionListView: View {
                     .padding(5)
                 }
                 .scrollIndicators(.never)
-                .onChange(of: model.selectedIndex) { _, index in proxy.scrollTo(index) }
+                .onChange(of: model.selectedIndex) { _, _ in
+                    if let item = model.selectedItem { proxy.scrollTo(item.id) }
+                }
             }
             if let item = model.selectedItem, [.function, .aggregate, .setting].contains(item.kind), let detail = item.detail {
                 Divider()

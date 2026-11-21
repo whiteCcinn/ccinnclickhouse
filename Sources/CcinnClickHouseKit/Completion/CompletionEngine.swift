@@ -33,14 +33,18 @@ public struct CompletionResult: Sendable {
     public let missingColumns: [TableKey]
     /// Databases whose object lists are needed but not loaded yet.
     public let missingDatabases: [String]
+    /// Only a name from a known list can follow the cursor (a table after `FROM `, a database after `USE `, a format
+    /// after `FORMAT ` …), so the editor may offer the list before anything is typed.
+    public let expectsObjectName: Bool
 
     public init(replacementRange: Range<Int>, prefix: String, items: [CompletionItem], missingColumns: [TableKey] = [],
-                missingDatabases: [String] = []) {
+                missingDatabases: [String] = [], expectsObjectName: Bool = false) {
         self.replacementRange = replacementRange
         self.prefix = prefix
         self.items = items
         self.missingColumns = missingColumns
         self.missingDatabases = missingDatabases
+        self.expectsObjectName = expectsObjectName
     }
 
     public var needsMoreSchema: Bool { !missingColumns.isEmpty || !missingDatabases.isEmpty }
@@ -58,6 +62,8 @@ public enum CompletionEngine {
         case statementStart
         case showTarget
         case tableName(allowTableFunctions: Bool)
+        /// The name of the object a CREATE / ATTACH defines: existing tables are offered once typed, never on a space.
+        case newTableName
         case afterTableReference
         case database
         case expression
@@ -66,6 +72,14 @@ public enum CompletionEngine {
         case engine
         case dataType
         case cluster
+
+        /// Only a name from a known list can follow. Not data types: a column definition may omit its type.
+        var expectsName: Bool {
+            switch self {
+            case .tableName, .database, .setting, .format, .engine, .cluster: true
+            case .statementStart, .showTarget, .afterTableReference, .expression, .dataType, .newTableName: false
+            }
+        }
     }
 
     struct ScopeTable {
@@ -115,6 +129,7 @@ public enum CompletionEngine {
         var candidates: [CompletionItem]
         var missing: [TableKey] = []
         var missingDatabases: [String] = []
+        var expectsObjectName = false
         if let last = before.last, isDot(last, lexer) {
             let qualifier = qualifierChain(before: before, lexer: lexer)
             (candidates, missing) = memberCandidates(qualifier: qualifier, scope: scope, schema: schema)
@@ -127,10 +142,11 @@ public enum CompletionEngine {
             if case .tableName = context, let current = schema.currentDatabase, schema.objects(in: current) == nil {
                 missingDatabases.append(current)
             }
+            expectsObjectName = context.expectsName && opensOnSpace(context, before: before, lexer: lexer)
         }
         let ranked = rank(candidates, prefix: prefix, limit: limit)
         return CompletionResult(replacementRange: replacementStart..<cursor, prefix: prefix, items: ranked,
-                                missingColumns: missing, missingDatabases: missingDatabases)
+                                missingColumns: missing, missingDatabases: missingDatabases, expectsObjectName: expectsObjectName)
     }
 
     // MARK: Scope analysis
@@ -290,6 +306,65 @@ public enum CompletionEngine {
         return columns
     }
 
+    /// Re-ranks `result`'s items for its prefix followed by `typed` (a keystroke that extends the word): the editor narrows
+    /// the shown list at once, so Return never takes a name for the letters before. The next full result replaces it.
+    public static func narrow(_ result: CompletionResult, appending typed: String) -> CompletionResult {
+        let prefix = result.prefix + typed
+        let end = result.replacementRange.upperBound + typed.utf16.count
+        return CompletionResult(replacementRange: result.replacementRange.lowerBound..<end, prefix: prefix,
+                                items: rank(result.items, prefix: prefix, limit: result.items.count), missingColumns: result.missingColumns,
+                                missingDatabases: result.missingDatabases, expectsObjectName: result.expectsObjectName)
+    }
+
+    /// Words a clause keyword cannot follow: after them `engine` or `format` is a column, not a clause.
+    static let expressionLeaders: Set<String> = ["SELECT", "WHERE", "PREWHERE", "ON", "HAVING", "BY", "AND", "OR", "NOT", "WHEN", "THEN", "ELSE",
+                                                 "CASE", "DISTINCT", "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "USING", "QUALIFY", "AS", ",", "(", "["]
+
+    static func isColumnPosition(_ index: Int, words: [String], before: [SQLToken]) -> Bool {
+        guard index > 0 else { return false }
+        return expressionLeaders.contains(words[index - 1]) || before[index - 1].kind == .operator
+    }
+
+    static let definingVerbs: Set<String> = ["CREATE", "ATTACH", "REPLACE"]
+
+    /// A space opens the list only where nothing but such a name can follow, and only a list of the right kind.
+    static func opensOnSpace(_ context: Context, before: [SQLToken], lexer: SQLLexer) -> Bool {
+        let words = before.map { lexer.text(of: $0).uppercased() }
+        let firstWord = words.first ?? ""
+        switch context {
+        case .database:
+            // `SHOW TABLES ` goes on with FROM / IN / LIKE; its databases are offered once a letter is typed.
+            return words.last != "TABLES"
+        case .setting:
+            // The SETTINGS of a CREATE take MergeTree / engine settings, which the list does not hold.
+            return !definingVerbs.contains(firstWord)
+        case .engine:
+            // CREATE DATABASE takes database engines, which the list does not hold.
+            return !words.prefix(4).contains("DATABASE")
+        default:
+            return true
+        }
+    }
+
+    /// `FROM` at `index` reads a table, unless it is the FROM of a function call (`extract(DAY FROM d)`, `trim(… FROM s)`):
+    /// within its parenthesis level a SELECT comes first, or the level is the statement itself.
+    static func fromNamesATable(at index: Int, words: [String], before: [SQLToken]) -> Bool {
+        var depth = 0
+        for position in stride(from: index - 1, through: 0, by: -1) {
+            let word = words[position]
+            if before[position].kind == .punctuation {
+                if word == ")" || word == "]" { depth += 1 }
+                if word == "(" || word == "[" {
+                    if depth == 0 { return false }
+                    depth -= 1
+                }
+                continue
+            }
+            if depth == 0, word == "SELECT" { return true }
+        }
+        return true
+    }
+
     // MARK: Clause context
 
     static func clauseContext(before: [SQLToken], lexer: SQLLexer) -> Context {
@@ -301,12 +376,21 @@ public enum CompletionEngine {
 
         if last == "SHOW" { return .showTarget }
         if last == "USE" { return .database }
-        if last == "FORMAT" { return .format }
-        if last == "ENGINE" || (last == "=" && previous == "ENGINE") { return .engine }
+        if last == "FORMAT", !isColumnPosition(words.count - 1, words: words, before: before) { return .format }
+        // ENGINE is a clause of CREATE / ATTACH only; elsewhere `engine` is a column (system.tables, system.databases).
+        if definingVerbs.contains(firstWord) {
+            if last == "ENGINE", !isColumnPosition(words.count - 1, words: words, before: before) { return .engine }
+            if last == "=", previous == "ENGINE", !isColumnPosition(words.count - 2, words: words, before: before) { return .engine }
+        }
         if last == "CLUSTER" && previous == "ON" { return .cluster }
         if last == "::" { return .dataType }
         if firstWord == "SET", last == "SET" || (last == "," && words.count >= 2) { return isInsideSettingsValue(words) ? .expression : .setting }
-        if firstWord == "SHOW", last == "FROM" || last == "IN" { return .database }
+        if firstWord == "SHOW", last == "FROM" || last == "IN" {
+            // `SHOW COLUMNS FROM t [FROM db]`: the first FROM names a table.
+            let namesTable = words.dropFirst().prefix(3).contains { ["COLUMNS", "FIELDS", "INDEX", "INDEXES", "INDICES", "KEYS"].contains($0) }
+            let earlierFrom = words.dropLast().contains { $0 == "FROM" || $0 == "IN" }
+            return namesTable && !earlierFrom ? .tableName(allowTableFunctions: false) : .database
+        }
         if last == ",", isInSettingsList(words: words) { return .setting }
 
         // Walk back within the current parenthesis level to the nearest clause keyword.
@@ -331,14 +415,25 @@ public enum CompletionEngine {
             }
             guard depth == 0 else { continue }
             switch text {
+            case "DESC" where index > 0, "DESCRIBE" where index > 0:
+                break // `ORDER BY x DESC`: a sort direction; only a statement-leading DESC describes a table.
+            case "EXISTS" where index > 0 && words[index - 1] != "IF":
+                break // `WHERE EXISTS (…)`: a subquery follows; `EXISTS t` and `IF [NOT] EXISTS t` name a table.
             case "SETTINGS":
                 return distance == 0 || (sawComma && last == ",") ? .setting : .expression
+            case "JOIN" where index > 0 && words[index - 1] == "ARRAY":
+                return .expression // `ARRAY JOIN arr`: an array expression follows
+            case "FROM" where !fromNamesATable(at: index, words: words, before: before):
+                return .expression // `extract(DAY FROM d)`
+            case "INTO" where firstWord != "INSERT":
+                return .expression // `INTO OUTFILE`
             case "FROM", "JOIN":
                 if distance == 0 || sawComma { return .tableName(allowTableFunctions: true) }
                 return .afterTableReference
             case "INTO", "TABLE", "DESCRIBE", "DESC", "EXISTS", "TABLES":
-                if distance == 0 { return text == "TABLES" ? .database : .tableName(allowTableFunctions: false) }
-                return .expression
+                guard distance == 0 else { return .expression }
+                if text == "TABLES" { return .database }
+                return definingVerbs.contains(firstWord) && (text == "TABLE" || text == "EXISTS") ? .newTableName : .tableName(allowTableFunctions: false)
             case "SELECT", "WHERE", "PREWHERE", "ON", "HAVING", "BY", "AND", "OR", "NOT", "WHEN", "THEN", "ELSE", "CASE", "DISTINCT",
                  "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "USING", "OVER", "PARTITION", "VALUES", "QUALIFY", "LIMIT", "OFFSET":
                 return .expression
@@ -413,6 +508,8 @@ public enum CompletionEngine {
             return (SQLKeywords.showTargets.map(keywordItem), [])
         case .database:
             return (databaseCandidates(schema), [])
+        case .newTableName:
+            return contextCandidates(.tableName(allowTableFunctions: false), scope: scope, schema: schema, prefix: prefix)
         case let .tableName(allowTableFunctions):
             var items: [CompletionItem] = []
             if let current = schema.currentDatabase { items += objectCandidates(database: current, schema: schema) }
