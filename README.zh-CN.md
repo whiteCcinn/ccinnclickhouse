@@ -51,6 +51,7 @@ CcinnClickHouse 把这些都放在一次点击之内。它是原生 SwiftUI/AppK
 - **SQL 工作台**
   - 懂 ClickHouse 的语法高亮（嵌套注释、heredoc、`{name:Type}` 参数）。
   - 由服务器提供的补全：**函数与聚合组合器**（`sumIf`、`uniqMerge`、`avgOrNullIf`）、`SET` / `SETTINGS` 后的 **设置项**（带说明）、格式、引擎、表函数、数据类型、集群，以及数据库、表、通过别名与 CTE 的列。
+  - 在 `FROM`、`JOIN`、`INTO`、`USE`、`FORMAT`、`SETTINGS`、`ENGINE =` 或 `ON CLUSTER` 后输入空格，会直接列出表、数据库、格式、设置项、引擎或集群。列表始终与已输入的内容一致；在用方向键选中某一项之前，回车和 Tab 保持原本的作用。
   - 懂 `LIMIT … BY`、`SETTINGS`、`FORMAT` 的自动 `LIMIT`；查询运行时的 **实时进度**（已读行数与字节）；**真正的取消**。
   - **精确的报错提示**：在 ClickHouse 拒绝的那个词下方划线，并在该行末尾显示简短说明，例如 `Syntax error near 't'. Expected one of: …`，不再罗列 60 个候选项和回显的整条查询；保留 `Maybe you meant` 建议。即使服务器没有给出位置，也会按名称找到未知的列、表、数据库、函数和设置项，新旧 analyzer 都支持。标记会随编辑移动，修改出错语句后自动消失。
   - 输入时即时提示未闭合的引号、注释、`$$` heredoc 和括号。
@@ -70,6 +71,7 @@ CcinnClickHouse 把这些都放在一次点击之内。它是原生 SwiftUI/AppK
   - **多窗口**，每个窗口使用独立连接：文件 ▸ 新建窗口（**New CcinnClickHouse Window**，⌘N），**用当前连接新建窗口**（⇧⌘N，也可点工具栏的“新建窗口”按钮），或在已保存的连接上选择**在新窗口中打开**。
   - HTTP 与 **HTTPS**（支持私有 CA，测试环境可跳过校验），反向代理路径前缀，**chproxy** 与负载均衡。
   - 通过系统 OpenSSH 的 SSH 隧道（agent、密钥或密码）；隧道从不加入或成为共享的 `ControlMaster` 连接。
+  - **权限受限的用户。** 只被授予自己数据库权限的用户（`GRANT SELECT ON analytics.*`）也能看到这些数据库及其表、列和补全。无权读取的 `system` 表会显示 ClickHouse 的拒绝访问信息。
   - **由 ClickHouse 强制执行的只读连接**（`readonly=1`，连接时在真实请求路径上验证），以及执行修改数据或结构的语句前可选的确认。
 - **通过 MCP 让 AI 访问。** 内置 Model Context Protocol 服务，让 Claude Code、Codex、Claude Desktop 浏览并查询你授权的连接，默认只读。详见 [MCP 服务](#mcp-服务让-ai-查询-clickhouse)。
 - **默认安全。** 密码保存在 macOS 钥匙串中；除非你开启 AI 访问，否则不会收集或发送任何数据。

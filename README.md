@@ -51,6 +51,7 @@ CcinnClickHouse puts all of that one click away, in a native SwiftUI/AppKit app 
 - **SQL workbench**
   - Highlighting that understands ClickHouse (nested comments, heredocs, `{name:Type}` parameters).
   - Completion fed by the server: **functions with aggregate combinators** (`sumIf`, `uniqMerge`, `avgOrNullIf`), **settings** after `SET` / `SETTINGS` with their descriptions, formats, engines, table functions, data types, clusters, plus databases, tables, columns through aliases and CTEs.
+  - A space after `FROM`, `JOIN`, `INTO`, `USE`, `FORMAT`, `SETTINGS`, `ENGINE =` or `ON CLUSTER` opens the list of tables, databases, formats, settings, engines or clusters. The list always matches what is typed; Return and Tab keep their meaning until you choose an item with the arrow keys.
   - Automatic `LIMIT` that knows `LIMIT … BY`, `SETTINGS` and `FORMAT`; **live progress** (rows and bytes read) while a query runs; **real cancellation**.
   - **Precise errors.** The token ClickHouse rejected is underlined, with a short message after the line: `Syntax error near 't'. Expected one of: …` instead of 60 alternatives and the echoed query; `Maybe you meant` suggestions are kept. Unknown columns, tables, databases, functions and settings are found by name even when the server gives no position, with either analyzer. The marker follows your edits and disappears once you change the failing statement.
   - Unclosed quotes, comments, `$$` heredocs and brackets are flagged as you type.
@@ -70,6 +71,7 @@ CcinnClickHouse puts all of that one click away, in a native SwiftUI/AppKit app 
   - **Multiple windows**, each with its own connection: File ▸ **New CcinnClickHouse Window** (⌘N), **New Window with This Connection** (⇧⌘N, also the toolbar's New Window button), or **Open in New Window** on a saved connection.
   - HTTP and **HTTPS** (with a private CA, or skip verification for tests), path prefixes for reverse proxies, **chproxy** and load balancers.
   - SSH tunnels through your system OpenSSH (agent, key or password). A tunnel never joins or becomes a shared `ControlMaster` connection.
+  - **Users with limited grants.** A user whose grants cover only its own databases (`GRANT SELECT ON analytics.*`) sees them with their tables, columns and completion. Views of `system` tables it may not read show ClickHouse's access-denied message.
   - **Read-only connections enforced by ClickHouse** (`readonly=1`, verified on the real request path when connecting), and optional confirmation before statements that change data or schema.
 - **AI access through MCP.** A built-in Model Context Protocol server lets Claude Code, Codex and Claude Desktop explore and query the connections you opt in, read-only by default. See [MCP server](#mcp-server-let-ai-query-clickhouse).
 - **Secure by default.** Passwords live in the macOS Keychain; nothing is collected or sent anywhere unless you enable AI access.

@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+
+- **Users whose grants cover one database saw an empty sidebar.** A user with `GRANT SELECT ON analytics.*` only (the setup recommended for AI access) connected without error, but no database, table or column appeared, with no spinner and no error.
+  - Cause: ClickHouse lists a table in `system.columns` only with `SHOW COLUMNS` on it, so such a user gets no row for the `system` tables there, though it may still read `system.databases`, `system.tables` and `system.columns` (and, on 22.8, almost every `system` table). The app took that for "these tables have no columns", asked for `NULL` instead of every column, and dropped every row without a name.
+  - Also affected: completion (no tables or columns, and only the built-in function and setting lists), MCP `list_databases`, `list_tables` and `describe_table`, the connection test (0 databases) and, on 22.8, parts, merges, mutations, running queries, disks and dictionaries, which showed empty values.
+  - The app now learns a `system` table's columns from `DESCRIBE (SELECT * FROM system.<table>)` when `system.columns` lists none. It needs exactly the grant the real query needs and runs nothing. That is at most one request per table and connection, and only for tables `system.columns` does not list.
+  - A `system` table the user may not read shows ClickHouse's access-denied message instead of empty values, or of "`system.query_log` does not exist".
+  - The sidebar says **No databases** when the user can see none, and offers **Show System Databases** when only system databases are hidden.
+  - With 1.3.0, `GRANT SHOW COLUMNS ON system.databases` (and on `system.tables` and `system.columns`) to the user works around it.
+- **SQL completion showed suggestions for text you had already typed past.** The popup kept drawing an earlier list while it moved and resized for the new one: typing a table name kept the list for its first letters, and Return could insert a different name. The popup now shows exactly the suggestions for the text at the cursor.
+- **Name lists open on a space.** A space after `FROM`, `JOIN`, `INTO`, `TABLE` or a leading `DESC`/`DESCRIBE`/`EXISTS` opens the tables and views of the current database; after `USE` the databases, after `FORMAT` the formats, after `SET`/`SETTINGS` the settings, after `ENGINE =` the engines and after `ON CLUSTER` the clusters. Return and Tab never open it, and a space closes an open list at once.
+- `ORDER BY … DESC` and `WHERE EXISTS` no longer suggest tables.
+
 ## [1.3.0] - 2026-11-18
 
 ### Added
