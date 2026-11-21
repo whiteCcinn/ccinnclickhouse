@@ -451,11 +451,15 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         if table.family.hasParts {
             async let indices = client.skippingIndices(database: database, table: table.name)
             async let projections = client.projections(database: database, table: table.name, createStatement: table.createTableQuery)
-            result["skipping_indexes"] = .array(try await indices.map { index in
-                ["name": .string(index.name), "type": .string(index.typeFull ?? index.type), "expression": .string(index.expression),
-                 "granularity": .int(index.granularity), "compressed_bytes": JSONValue(index.compressedBytes),
-                 "uncompressed_bytes": JSONValue(index.uncompressedBytes)]
-            })
+            do {
+                result["skipping_indexes"] = .array(try await indices.map { index in
+                    ["name": .string(index.name), "type": .string(index.typeFull ?? index.type), "expression": .string(index.expression),
+                     "granularity": .int(index.granularity), "compressed_bytes": JSONValue(index.compressedBytes),
+                     "uncompressed_bytes": JSONValue(index.uncompressedBytes)]
+                })
+            } catch let error as ClickHouseError where error.isAccessDenied {
+                result["skipping_indexes"] = Self.accessDeniedNote("data_skipping_indices")
+            }
             result["projections"] = .array(try await projections.map { projection in
                 ["name": .string(projection.name), "type": JSONValue(projection.type), "sorting_key": JSONValue(projection.sortingKey),
                  "parts": JSONValue(projection.parts), "rows": JSONValue(projection.rows),
@@ -609,6 +613,11 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         }
     }
 
+    /// One part of a composite answer the user may not read: said so, instead of failing the whole call.
+    static func accessDeniedNote(_ table: String) -> JSONValue {
+        .string("access denied: this ClickHouse user may not read system.\(table)")
+    }
+
     private func clusterTopology(_ client: ClickHouseClient) async throws -> JSONValue {
         async let clusters = client.clusters()
         async let keeper = client.keeperStatus()
@@ -621,6 +630,15 @@ public struct ClickHouseMCPTools: MCPToolProvider {
         case let .unavailable(message): keeperState = .string("unavailable: \(message.prefix(500))")
         }
         let keeperValue = try await keeper
+        let recentDDL: JSONValue
+        do {
+            recentDDL = .array(try await ddl.map { entry in
+                ["entry": .string(entry.entry), "host": JSONValue(entry.host), "status": JSONValue(entry.status),
+                 "query": .string(String(SQLRedactor.digest(entry.query).prefix(1_000))), "exception_code": JSONValue(entry.exceptionCode)]
+            })
+        } catch let error as ClickHouseError where error.isAccessDenied {
+            recentDDL = Self.accessDeniedNote("distributed_ddl_queue")
+        }
         return [
             "clusters": .array(try await clusters.prefix(500).map { replica in
                 ["cluster": .string(replica.cluster), "shard": .int(replica.shardNumber), "replica": .int(replica.replicaNumber),
@@ -629,10 +647,7 @@ public struct ClickHouseMCPTools: MCPToolProvider {
             "keeper": ["state": keeperState, "host": JSONValue(keeperValue.host), "port": JSONValue(keeperValue.port),
                        "session_uptime_seconds": JSONValue(keeperValue.sessionUptimeSeconds)],
             "macros": .object(Dictionary(try await macros.map { ($0.name, JSONValue.string($0.value)) }, uniquingKeysWith: { $1 })),
-            "recent_ddl": .array(try await ddl.map { entry in
-                ["entry": .string(entry.entry), "host": JSONValue(entry.host), "status": JSONValue(entry.status),
-                 "query": .string(String(SQLRedactor.digest(entry.query).prefix(1_000))), "exception_code": JSONValue(entry.exceptionCode)]
-            }),
+            "recent_ddl": recentDDL,
         ]
     }
 

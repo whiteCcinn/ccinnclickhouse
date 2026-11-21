@@ -53,6 +53,8 @@ final class OperationsModel {
         var keeper: KeeperStatus
         var macros: [(name: String, value: String)]
         var ddl: [DistributedDDLEntry]
+        /// The user may not read `system.distributed_ddl_queue`; the rest of the snapshot still shows.
+        var ddlDenied = false
     }
 
     unowned let workspace: WorkspaceModel
@@ -150,7 +152,13 @@ final class OperationsModel {
                     async let keeper = client.keeperStatus()
                     async let macros = client.macros()
                     async let ddl = client.distributedDDLQueue(limit: 100)
-                    return ClusterSnapshot(replicas: try await replicas, keeper: try await keeper, macros: try await macros, ddl: try await ddl)
+                    var snapshot = ClusterSnapshot(replicas: try await replicas, keeper: try await keeper, macros: try await macros, ddl: [])
+                    do {
+                        snapshot.ddl = try await ddl
+                    } catch let error as ClickHouseError where error.isAccessDenied {
+                        snapshot.ddlDenied = true
+                    }
+                    return snapshot
                 }
             }
             if !Task.isCancelled, refreshGeneration == generation { lastRefreshed = Date() }

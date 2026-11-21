@@ -29,6 +29,9 @@ struct ClusterView: View {
                     ForEach(clusters, id: \.key) { cluster, replicas in
                         ClusterCard(name: cluster, replicas: replicas, isConfigured: cluster == model.workspace.cluster)
                     }
+                    if snapshot.ddlDenied {
+                        NoticeBanner(message: "This user may not read system.distributed_ddl_queue, so ON CLUSTER tasks are not shown.")
+                    }
                     if !snapshot.ddl.isEmpty {
                         Card(title: "Recent ON CLUSTER tasks", systemImage: "list.bullet.clipboard") {
                             ForEach(snapshot.ddl.prefix(30)) { entry in

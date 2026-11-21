@@ -9,11 +9,16 @@ extension ClickHouseClient {
 
     /// Partitions of a MergeTree table with active/inactive part counts and sizes.
     public func partitions(database: String, table: String) async throws -> [PartitionSummary] {
+        // Not learned (refused): name the columns, so the server answers values or its error, not NULL dates.
+        let known = try await ensureSystemTable("parts")
         let schema = systemSchema
-        let minDate = schema.has("parts", column: "min_date") ? "toString(min(min_date))" : "NULL"
-        let maxDate = schema.has("parts", column: "max_date") ? "toString(max(max_date))" : "NULL"
-        let minTime = schema.has("parts", column: "min_time") ? "toString(min(min_time))" : "NULL"
-        let maxTime = schema.has("parts", column: "max_time") ? "toString(max(max_time))" : "NULL"
+        func range(_ aggregate: String, _ column: String) -> String {
+            !known || schema.has("parts", column: column) ? "toString(\(aggregate)(\(column)))" : "NULL"
+        }
+        let minDate = range("min", "min_date")
+        let maxDate = range("max", "max_date")
+        let minTime = range("min", "min_time")
+        let maxTime = range("max", "max_time")
         let sql = """
             SELECT partition, partition_id, countIf(active) AS active_parts, countIf(NOT active) AS inactive_parts, \
             sumIf(rows, active) AS rows, sumIf(bytes_on_disk, active) AS bytes_on_disk, \
@@ -33,25 +38,30 @@ extension ClickHouseClient {
 
     /// Active parts, newest first, optionally of one partition.
     public func parts(database: String, table: String, partitionID: String? = nil, limit: Int = 2_000) async throws -> [PartInfo] {
-        var sql = "SELECT \(systemSchema.selectList("parts", Self.partColumns)) FROM system.parts WHERE \(tableFilter(database: database, table: table)) AND active"
+        var sql = "SELECT \(try await selectList(system: "parts", Self.partColumns)) FROM system.parts WHERE \(tableFilter(database: database, table: table)) AND active"
         if let partitionID { sql += " AND partition_id = \(SQLText.literal(partitionID))" }
         sql += " ORDER BY modification_time DESC LIMIT \(max(1, min(limit, 100_000)))"
         return try await execute(sql).records.map(PartInfo.init(record:))
     }
 
+    static let skippingIndexColumns = ["name", "type", "type_full", "expr", "granularity", "data_compressed_bytes", "data_uncompressed_bytes",
+                                       "marks"]
+
     public func skippingIndices(database: String, table: String) async throws -> [SkippingIndex] {
-        guard systemSchema.hasTable("data_skipping_indices") else { return [] }
-        let list = systemSchema.selectList("data_skipping_indices", ["name", "type", "type_full", "expr", "granularity", "data_compressed_bytes",
-                                                                     "data_uncompressed_bytes", "marks"])
+        guard try await optionalSystemTable("data_skipping_indices") else { return [] }
+        let list = systemSchema.selectList("data_skipping_indices", Self.skippingIndexColumns)
         let result = try await execute("SELECT \(list) FROM system.data_skipping_indices WHERE \(tableFilter(database: database, table: table))")
         return result.records.map(SkippingIndex.init(record:))
     }
 
+    static let projectionColumns = ["name", "type", "sorting_key", "query"]
+
     /// Projections from `system.projections` (24.x+) or the CREATE statement, with storage from `system.projection_parts`.
+    /// A user who may not read `system.projections` gets them from the CREATE statement too.
     public func projections(database: String, table: String, createStatement: String?) async throws -> [ProjectionInfo] {
         var projections: [ProjectionInfo] = []
-        if systemSchema.hasTable("projections") {
-            let list = systemSchema.selectList("projections", ["name", "type", "sorting_key", "query"])
+        if try await ensureSystemTable("projections") {
+            let list = systemSchema.selectList("projections", Self.projectionColumns)
             let result = try await execute("SELECT \(list) FROM system.projections WHERE \(tableFilter(database: database, table: table))")
             projections = result.records.compactMap { record in
                 guard let name = record.raw("name") else { return nil }
@@ -62,7 +72,7 @@ extension ClickHouseClient {
         } else if let createStatement {
             projections = CreateStatementDetails.parse(createStatement).projections.map { ProjectionInfo(name: $0.name, definition: $0.definition) }
         }
-        guard !projections.isEmpty, systemSchema.hasTable("projection_parts") else { return projections }
+        guard !projections.isEmpty, try await ensureSystemTable("projection_parts") else { return projections }
         let sizes = try await tolerant("""
             SELECT name, count() AS parts, sum(rows) AS rows, sum(bytes_on_disk) AS bytes_on_disk FROM system.projection_parts \
             WHERE \(tableFilter(database: database, table: table)) AND active GROUP BY name
@@ -99,7 +109,7 @@ extension ClickHouseClient {
     public func replicas(database: String? = nil, table: String? = nil) async throws -> [ReplicaStatus] {
         var columns = Self.replicaColumns
         if table != nil { columns += ["total_replicas", "active_replicas"] }
-        var sql = "SELECT \(systemSchema.selectList("replicas", columns)) FROM system.replicas"
+        var sql = "SELECT \(try await selectList(system: "replicas", columns)) FROM system.replicas"
         if let database, let table {
             sql += " WHERE \(tableFilter(database: database, table: table))"
         } else if let database {
@@ -114,7 +124,7 @@ extension ClickHouseClient {
                                "postpone_reason"]
 
     public func replicationQueue(database: String? = nil, table: String? = nil, limit: Int = 1_000) async throws -> [ReplicationQueueEntry] {
-        var sql = "SELECT \(systemSchema.selectList("replication_queue", Self.queueColumns)) FROM system.replication_queue"
+        var sql = "SELECT \(try await selectList(system: "replication_queue", Self.queueColumns)) FROM system.replication_queue"
         if let database, let table { sql += " WHERE \(tableFilter(database: database, table: table))" }
         sql += " ORDER BY num_tries DESC, create_time LIMIT \(max(1, min(limit, 100_000)))"
         return try await execute(sql).records.map(ReplicationQueueEntry.init(record:))
@@ -125,7 +135,7 @@ extension ClickHouseClient {
                                "merge_algorithm"]
 
     public func merges(database: String? = nil, table: String? = nil, cluster: String? = nil) async throws -> [MergeInfo] {
-        let list = systemSchema.selectList("merges", Self.mergeColumns)
+        let list = try await selectList(system: "merges", Self.mergeColumns)
         var sql = "SELECT hostName() AS host, \(list) FROM \(source("merges", cluster: cluster))"
         if let database, let table { sql += " WHERE \(tableFilter(database: database, table: table))" }
         sql += " ORDER BY elapsed DESC"
@@ -139,7 +149,7 @@ extension ClickHouseClient {
         var predicates: [String] = []
         if let database, let table { predicates.append(tableFilter(database: database, table: table)) }
         if activeOnly { predicates.append("NOT is_done") }
-        var sql = "SELECT \(systemSchema.selectList("mutations", Self.mutationColumns)) FROM system.mutations"
+        var sql = "SELECT \(try await selectList(system: "mutations", Self.mutationColumns)) FROM system.mutations"
         if !predicates.isEmpty { sql += " WHERE " + predicates.joined(separator: " AND ") }
         sql += " ORDER BY is_done, create_time DESC LIMIT \(max(1, min(limit, 10_000)))"
         return try await execute(sql).records.map(MutationInfo.init(record:))
@@ -154,10 +164,12 @@ extension ClickHouseClient {
         return result.rows.count
     }
 
+    static let distributionQueueColumns = ["database", "table", "data_path", "is_blocked", "error_count", "data_files", "data_compressed_bytes",
+                                           "last_exception"]
+
     public func distributionQueue(database: String, table: String) async throws -> [DistributionQueueEntry] {
-        guard systemSchema.hasTable("distribution_queue") else { return [] }
-        let list = systemSchema.selectList("distribution_queue", ["database", "table", "data_path", "is_blocked", "error_count", "data_files",
-                                                                  "data_compressed_bytes", "last_exception"])
+        guard try await optionalSystemTable("distribution_queue") else { return [] }
+        let list = systemSchema.selectList("distribution_queue", Self.distributionQueueColumns)
         return try await execute("SELECT \(list) FROM system.distribution_queue WHERE \(tableFilter(database: database, table: table))")
             .records.map(DistributionQueueEntry.init(record:))
     }
@@ -167,7 +179,7 @@ extension ClickHouseClient {
                                     "last_successful_update_time", "loading_duration", "last_exception", "comment"]
 
     public func dictionaries(database: String? = nil) async throws -> [DictionaryInfo] {
-        var sql = "SELECT \(systemSchema.selectList("dictionaries", Self.dictionaryColumns)) FROM system.dictionaries"
+        var sql = "SELECT \(try await selectList(system: "dictionaries", Self.dictionaryColumns)) FROM system.dictionaries"
         if let database { sql += " WHERE database = \(SQLText.literal(database))" }
         sql += " ORDER BY database, name"
         return try await execute(sql).records.map(DictionaryInfo.init(record:))

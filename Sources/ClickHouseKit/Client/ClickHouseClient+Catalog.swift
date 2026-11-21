@@ -3,8 +3,10 @@ import Foundation
 
 /// Schema browsing (design D10: version-adaptive column lists, fallbacks only on server errors).
 extension ClickHouseClient {
+    static let databaseColumns = ["name", "engine", "engine_full", "comment", "uuid"]
+
     public func databases() async throws -> [DatabaseInfo] {
-        let list = systemSchema.selectList("databases", ["name", "engine", "engine_full", "comment", "uuid"])
+        let list = try await selectList(system: "databases", Self.databaseColumns)
         let result = try await execute("SELECT \(list) FROM system.databases")
         return result.records.compactMap { record in
             guard let name = record.raw("name") else { return nil }
@@ -17,17 +19,19 @@ extension ClickHouseClient {
                                    "sampling_key", "storage_policy", "total_rows", "total_bytes", "total_bytes_uncompressed", "active_parts",
                                    "total_marks", "metadata_modification_time"]
 
+    static let tableDetailColumns = tableListColumns + ["engine_full", "create_table_query", "as_select", "dependencies_database",
+                                                         "dependencies_table"]
+
     /// Tables of one database (without the heavy CREATE statements).
     public func tables(database: String) async throws -> [TableInfo] {
-        let list = systemSchema.selectList("tables", Self.tableListColumns)
+        let list = try await selectList(system: "tables", Self.tableListColumns)
         let result = try await execute("SELECT \(list) FROM system.tables WHERE database = \(SQLText.literal(database)) ORDER BY name")
         return result.records.compactMap(Self.table(from:))
     }
 
     /// Full details of one table, including the CREATE statement and dependants.
     public func table(database: String, name: String) async throws -> TableInfo? {
-        let list = systemSchema.selectList("tables", Self.tableListColumns + ["engine_full", "create_table_query", "as_select",
-                                                                              "dependencies_database", "dependencies_table"])
+        let list = try await selectList(system: "tables", Self.tableDetailColumns)
         let result = try await execute("""
             SELECT \(list) FROM system.tables WHERE database = \(SQLText.literal(database)) AND name = \(SQLText.literal(name))
             """)
@@ -72,10 +76,10 @@ extension ClickHouseClient {
 
     /// Columns keyed by table name, for the given tables (at most 100) or a whole database.
     public func columnsByTable(database: String, tables: [String]? = nil) async throws -> [String: [ColumnInfo]] {
-        let list = systemSchema.selectList("columns", Self.columnColumns)
+        if let tables, tables.isEmpty { return [:] }
+        let list = try await selectList(system: "columns", Self.columnColumns)
         var sql = "SELECT \(list) FROM system.columns WHERE database = \(SQLText.literal(database))"
         if let tables {
-            guard !tables.isEmpty else { return [:] }
             sql += " AND table IN (\(tables.prefix(100).map(SQLText.literal).joined(separator: ", ")))"
         }
         let result = try await execute(sql)

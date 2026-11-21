@@ -78,6 +78,9 @@ public struct ClickHouseError: Error, LocalizedError, Sendable, Equatable, Custo
         return Self.featureUnavailableCodes.contains(code) || isKeeperNotConfigured
     }
 
+    /// The user may not read or do this: ACCESS_DENIED, DATABASE_ACCESS_DENIED.
+    public var isAccessDenied: Bool { kind == .server && (code == Code.accessDenied || code == 291) }
+
     /// The server has no Keeper/ZooKeeper configured. The error differs by version: NO_ZOOKEEPER (225),
     /// NO_ELEMENTS_IN_CONFIG (139, "There is no Zookeeper configuration in server config", 23.x+) and
     /// KEEPER_EXCEPTION (999, "No hosts passed to ZooKeeper constructor", 22.x). A Keeper that is

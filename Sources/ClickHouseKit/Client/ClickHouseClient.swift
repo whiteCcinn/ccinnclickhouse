@@ -296,6 +296,7 @@ public final class ClickHouseClient: Sendable {
     @discardableResult
     public func killQuery(queryID: String, cluster: String? = nil, onAnotherNode: Bool = false, host: String? = nil,
                           sync: Bool = false) async throws -> KillOutcome {
+        // Built from what is known: a kill is never delayed by a metadata request. Progress polling learns `processes`.
         let condition = processCondition(queryID: queryID)
             + (host.flatMap { $0.isEmpty ? nil : " AND hostName() = \(SQLText.literal($0))" } ?? "")
         let sql = "KILL QUERY WHERE \(condition) \(sync ? "SYNC" : "ASYNC")"

@@ -19,6 +19,12 @@ struct SidebarView: View {
                 }
                 if workspace.isLoadingDatabases, workspace.databases.isEmpty {
                     HStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
+                } else if let placeholder = workspace.sidebarPlaceholder {
+                    SidebarPlaceholderRow(placeholder: placeholder, user: workspace.serverInfo.currentUser) {
+                        workspace.showSystemDatabases = true
+                    }
+                    .listRowSeparator(.hidden)
+                    .selectionDisabled()
                 }
             }
             .listStyle(.sidebar)
@@ -72,6 +78,31 @@ struct SidebarView: View {
             if let table = workspace.objects(in: database)?.first(where: { $0.id == id }) { return table }
         }
         return nil
+    }
+}
+
+/// Said instead of a blank list when no database is shown.
+private struct SidebarPlaceholderRow: View {
+    let placeholder: SidebarPlaceholder
+    let user: String?
+    let showSystemDatabases: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            switch placeholder {
+            case .noDatabases:
+                Text("No databases").font(.callout.weight(.medium))
+                Text(user.map { "\($0) has no access to any database." } ?? "This user has no access to any database.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .onlySystemDatabases:
+                Text("Only system databases").font(.callout.weight(.medium))
+                Button("Show System Databases", action: showSystemDatabases).buttonStyle(.link).font(.caption)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 6)
     }
 }
 

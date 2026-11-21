@@ -62,6 +62,8 @@ final class WorkspaceModel {
     let history: QueryHistoryStore
 
     var databases: [DatabaseInfo] = []
+    /// The database list has been loaded at least once (an empty list then means the user sees none).
+    private(set) var hasLoadedDatabases = false
     var isLoadingDatabases = false
     var databasesError: String?
     var databaseStates: [String: DatabaseState] = [:]
@@ -129,6 +131,10 @@ final class WorkspaceModel {
         showSystemDatabases ? databases : databases.filter { !$0.isSystem }
     }
 
+    var sidebarPlaceholder: SidebarPlaceholder? {
+        SidebarPlaceholder.make(hasLoaded: hasLoadedDatabases, failed: databasesError != nil, databases: databases, showSystem: showSystemDatabases)
+    }
+
     func reloadDatabases() async {
         databaseLoadGeneration &+= 1
         let generation = databaseLoadGeneration
@@ -138,6 +144,7 @@ final class WorkspaceModel {
             let loaded = try await client.databases()
             guard databaseLoadGeneration == generation else { return }
             databases = loaded
+            hasLoadedDatabases = true
             databasesError = nil
             if expandedDatabases.isEmpty {
                 let names = loaded.map(\.name)

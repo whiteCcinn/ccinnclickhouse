@@ -245,10 +245,20 @@ enum FakeAnswers {
         return rows
     }
 
+    /// `schema` limited to the table a single-table lookup (`… AND table = 'x'`) asks for, like the server.
+    static func schema(for sql: String) -> String {
+        let marker = "AND table = '"
+        guard let start = sql.range(of: marker)?.upperBound else { return schema }
+        let table = sql[start...].prefix { $0 != "'" }
+        let lines = schema.split(separator: "\n", omittingEmptySubsequences: false)
+        let rows = lines.dropFirst(2).filter { $0.hasPrefix(table + "\t") }
+        return (lines.prefix(2) + rows).joined(separator: "\n") + "\n"
+    }
+
     /// Answers probe and schema requests; returns nil for anything else.
     static func standard(_ request: FakeClickHouseServer.Request) -> FakeClickHouseServer.Response? {
         if request.sql.contains("version() AS version") { return .tsv(probe) }
-        if request.sql.contains("FROM system.columns WHERE database = 'system'") { return .tsv(schema) }
+        if request.sql.contains("FROM system.columns WHERE database = 'system'") { return .tsv(schema(for: request.sql)) }
         if request.sql.hasPrefix("KILL QUERY") { return .tsv("kill_status\tquery_id\nString\tString\n") }
         // The read-only path check (ParserSettings): the readonly level the request asked for, the parser settings as sent.
         if request.sql == ParserSettings.query { return .tsv(settings(request, readonly: request.parameters["readonly"] ?? "0")) }

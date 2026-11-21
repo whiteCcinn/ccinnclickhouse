@@ -8,7 +8,7 @@ extension ClickHouseClient {
 
     /// Running queries, across all replicas of `cluster` when given; the app's own monitoring queries are hidden.
     public func runningQueries(cluster: String? = nil, includeAppMonitoring: Bool = false) async throws -> [RunningQuery] {
-        let list = systemSchema.selectList("processes", Self.processColumns)
+        let list = try await selectList(system: "processes", Self.processColumns)
         let sql = "SELECT hostName() AS host, \(list) FROM \(source("processes", cluster: cluster)) ORDER BY elapsed DESC LIMIT 2000"
         let queries = try await run(sql, options: QueryOptions(purpose: "poll", limits: .metadata, timeout: Self.metadataTimeout, waitEndOfQuery: true, idempotent: true))
             .records.map(RunningQuery.init(record:))
@@ -25,6 +25,8 @@ extension ClickHouseClient {
 
     /// Live progress of a running query (`system.processes`), `nil` once it is no longer running.
     public func progress(of queryID: String, cluster: String? = nil) async throws -> QueryProgress? {
+        // Polled every 750 ms: a table this user may not read is not asked for.
+        guard try await ensureSystemTable("processes") else { return nil }
         let schema = systemSchema
         func column(_ name: String) -> String { schema.has("processes", column: name) ? SQLText.quoteIdentifier(name) : "0" }
         let sql = """
@@ -54,11 +56,14 @@ extension ClickHouseClient {
         case slowest, memory, failed, recent
     }
 
-    /// `system.query_log` is flushed periodically and may be disabled; `nil` when it does not exist.
+    static let queryLogColumns = ["event_time", "query_duration_ms", "read_rows", "read_bytes", "result_rows", "memory_usage", "user", "query_id",
+                                  "query", "exception", "exception_code", "type", "query_kind"]
+
+    /// `system.query_log` is flushed periodically and may be disabled; `nil` when it does not exist, the server's
+    /// refusal when the user may not read it.
     public func queryLog(_ analysis: QueryLogAnalysis, hours: Double = 1, limit: Int = 100, user: String? = nil) async throws -> [QueryLogEntry]? {
-        guard try await ensureSystemTable("query_log") else { return nil }
-        let list = systemSchema.selectList("query_log", ["event_time", "query_duration_ms", "read_rows", "read_bytes", "result_rows", "memory_usage",
-                                                         "user", "query_id", "query", "exception", "exception_code", "type", "query_kind"])
+        guard try await optionalSystemTable("query_log") else { return nil }
+        let list = systemSchema.selectList("query_log", Self.queryLogColumns)
         var predicates = [timeWindow(hours: hours)]
         switch analysis {
         case .slowest, .memory: predicates.append("type = 'QueryFinish'")
@@ -78,7 +83,7 @@ extension ClickHouseClient {
 
     /// Most expensive normalized query patterns.
     public func queryPatterns(hours: Double = 1, limit: Int = 50) async throws -> [QueryPattern]? {
-        guard try await ensureSystemTable("query_log") else { return nil }
+        guard try await optionalSystemTable("query_log") else { return nil }
         guard systemSchema.has("query_log", column: "normalized_query_hash") else { return [] }
         let sql = """
             SELECT toString(normalized_query_hash) AS hash, any(query) AS sample, count() AS count, sum(query_duration_ms) AS total_ms, \
@@ -92,7 +97,7 @@ extension ClickHouseClient {
 
     /// Totals per user.
     public func queryLogByUser(hours: Double = 1) async throws -> [UserQueryStats]? {
-        guard try await ensureSystemTable("query_log") else { return nil }
+        guard try await optionalSystemTable("query_log") else { return nil }
         let sql = """
             SELECT user, count() AS queries, countIf(type != 'QueryFinish') AS failures, sum(query_duration_ms) AS total_ms, \
             sum(read_bytes) AS read_bytes, sum(read_rows) AS read_rows, max(memory_usage) AS max_memory FROM system.query_log \
@@ -109,22 +114,28 @@ extension ClickHouseClient {
 
     // MARK: Storage
 
+    static let diskColumns = ["name", "path", "type", "free_space", "total_space", "unreserved_space", "keep_free_space", "is_read_only"]
+
     public func disks() async throws -> [DiskInfo] {
-        let list = systemSchema.selectList("disks", ["name", "path", "type", "free_space", "total_space", "unreserved_space", "keep_free_space", "is_read_only"])
+        let list = try await selectList(system: "disks", Self.diskColumns)
         return try await execute("SELECT \(list) FROM system.disks ORDER BY name").records.map(DiskInfo.init(record:))
     }
 
+    static let storagePolicyColumns = ["policy_name", "volume_name", "volume_priority", "disks", "volume_type", "max_data_part_size", "move_factor",
+                                       "prefer_not_to_merge"]
+
     public func storagePolicies() async throws -> [StoragePolicyVolume] {
-        let list = systemSchema.selectList("storage_policies", ["policy_name", "volume_name", "volume_priority", "disks", "volume_type", "max_data_part_size",
-                                                                "move_factor", "prefer_not_to_merge"])
+        let list = try await selectList(system: "storage_policies", Self.storagePolicyColumns)
         return try await execute("SELECT \(list) FROM system.storage_policies ORDER BY policy_name, volume_priority").records.map(StoragePolicyVolume.init(record:))
     }
 
     // MARK: Cluster
 
+    static let clusterColumns = ["cluster", "shard_num", "shard_weight", "replica_num", "host_name", "host_address", "port", "is_local", "user",
+                                 "errors_count", "slowdowns_count", "estimated_recovery_time"]
+
     public func clusters() async throws -> [ClusterReplica] {
-        let list = systemSchema.selectList("clusters", ["cluster", "shard_num", "shard_weight", "replica_num", "host_name", "host_address", "port",
-                                                        "is_local", "user", "errors_count", "slowdowns_count", "estimated_recovery_time"])
+        let list = try await selectList(system: "clusters", Self.clusterColumns)
         return try await execute("SELECT \(list) FROM system.clusters ORDER BY cluster, shard_num, replica_num").records.map(ClusterReplica.init(record:))
     }
 
@@ -133,9 +144,12 @@ extension ClickHouseClient {
         Array(Set(try await clusters().map(\.cluster))).sorted()
     }
 
+    static let keeperConnectionColumns = ["host", "port", "session_uptime_elapsed_seconds", "is_expired", "keeper_api_version"]
+
     public func keeperStatus() async throws -> KeeperStatus {
-        if systemSchema.hasTable("zookeeper_connection") {
-            let list = systemSchema.selectList("zookeeper_connection", ["host", "port", "session_uptime_elapsed_seconds", "is_expired", "keeper_api_version"])
+        // Like the query below, a failure to learn the table falls through to the classification.
+        if (try? await ensureSystemTable("zookeeper_connection")) == true {
+            let list = systemSchema.selectList("zookeeper_connection", Self.keeperConnectionColumns)
             // Any server error here falls through to the classification below.
             let connection = try? await tolerant("SELECT \(list) FROM system.zookeeper_connection LIMIT 1")
             if Task.isCancelled { throw ClickHouseError.cancelled() }
@@ -167,10 +181,12 @@ extension ClickHouseClient {
         }
     }
 
+    static let ddlQueueColumns = ["entry", "host", "host_name", "status", "cluster", "query", "query_create_time", "query_finish_time",
+                                  "exception_code"]
+
     public func distributedDDLQueue(limit: Int = 200) async throws -> [DistributedDDLEntry] {
-        guard systemSchema.hasTable("distributed_ddl_queue") else { return [] }
-        let list = systemSchema.selectList("distributed_ddl_queue", ["entry", "host", "host_name", "status", "cluster", "query", "query_create_time",
-                                                                     "query_finish_time", "exception_code"])
+        guard try await optionalSystemTable("distributed_ddl_queue") else { return [] }
+        let list = systemSchema.selectList("distributed_ddl_queue", Self.ddlQueueColumns)
         let sql = "SELECT \(list) FROM system.distributed_ddl_queue ORDER BY query_create_time DESC LIMIT \(max(1, min(limit, 10_000)))"
         guard let result = try await tolerant(sql, timeout: 20) else { return [] }
         return result.records.map(DistributedDDLEntry.init(record:))

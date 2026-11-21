@@ -67,12 +67,14 @@ public struct ServerVocabulary: Sendable {
 
     public var aggregateFunctionNames: [String] { functions.filter(\.isAggregate).map(\.name) }
 
+    static let functionColumns = ["name", "is_aggregate", "alias_to", "syntax", "description"]
+    static let settingColumns = ["name", "type", "value", "description"]
+
     /// Loads the vocabulary from `system.*`; each part falls back to the static list when unavailable
     /// (only server errors fall back; timeouts and cancellation propagate).
     public static func load(from client: ClickHouseClient) async throws -> ServerVocabulary {
-        let schema = client.systemSchema
         var vocabulary = fallback
-        let functionColumns = schema.selectList("functions", ["name", "is_aggregate", "alias_to", "syntax", "description"])
+        let functionColumns = try await client.selectList(system: "functions", Self.functionColumns)
         if let result = try await client.tolerant("SELECT \(functionColumns) FROM system.functions") {
             let functions = result.records.compactMap { record -> SQLFunction? in
                 guard let name = record.raw("name"), !name.isEmpty, !name.hasPrefix("_") else { return nil }
@@ -87,7 +89,7 @@ public struct ServerVocabulary: Sendable {
             let names = result.rows.compactMap { $0.first ?? nil }.filter { !$0.isEmpty }
             if !names.isEmpty { vocabulary.combinators = names }
         }
-        let settingColumns = schema.selectList("settings", ["name", "type", "value", "description"])
+        let settingColumns = try await client.selectList(system: "settings", Self.settingColumns)
         if let result = try await client.tolerant("SELECT \(settingColumns) FROM system.settings") {
             let settings = result.records.compactMap { record -> SettingEntry? in
                 guard let name = record.raw("name") else { return nil }
